@@ -1,0 +1,5 @@
+{
+  "name": "CampusGrid - Automatic Timetable Scheduler",
+  "description": "A comprehensive college timetable scheduling system with role-based views for Admin, HOD, Staff, and Students, featuring automated lab and placement allocation.",
+  "requestFramePermissions": []
+}
