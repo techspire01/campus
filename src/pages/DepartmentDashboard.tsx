@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Department, Class, Staff } from '../types';
 import { Plus, Users, GraduationCap, ChevronRight, BarChart3 } from 'lucide-react';
+import { clsx } from 'clsx';
 
 export default function DepartmentDashboard() {
   const { id } = useParams();
@@ -9,7 +10,7 @@ export default function DepartmentDashboard() {
   const [dept, setDept] = useState<Department | null>(null);
   const [classes, setClasses] = useState<Class[]>([]);
   const [staff, setStaff] = useState<Staff[]>([]);
-  const [newClass, setNewClass] = useState({ name: '', year: 1, semester: 1 });
+  const [newClass, setNewClass] = useState({ name: '', year: 1 });
 
   useEffect(() => {
     fetch('/api/departments').then(res => res.json()).then(data => {
@@ -28,11 +29,11 @@ export default function DepartmentDashboard() {
     const res = await fetch('/api/classes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...newClass, dept_id: parseInt(id!) })
+      body: JSON.stringify({ ...newClass, semester: 1, dept_id: parseInt(id!) })
     });
     const data = await res.json();
-    setClasses([...classes, { ...newClass, id: data.id, dept_id: parseInt(id!) } as Class]);
-    setNewClass({ name: '', year: 1, semester: 1 });
+    setClasses([...classes, { ...newClass, semester: 1, id: data.id, dept_id: parseInt(id!) } as Class]);
+    setNewClass({ name: '', year: 1 });
   };
 
   if (!dept) return <div className="text-cyan-400 font-mono">Loading department data...</div>;
@@ -68,10 +69,10 @@ export default function DepartmentDashboard() {
               </div>
             </div>
             <div className="p-6">
-              <div className="grid grid-cols-4 gap-2 mb-6">
+              <div className="grid grid-cols-3 gap-2 mb-6">
                 <input 
                   placeholder="Class Name (e.g. III CSDA)" 
-                  className="col-span-2 bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                  className="col-span-1 bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
                   value={newClass.name}
                   onChange={e => setNewClass({...newClass, name: e.target.value})}
                 />
@@ -84,16 +85,9 @@ export default function DepartmentDashboard() {
                   <option value={2}>Year 2</option>
                   <option value={3}>Year 3</option>
                 </select>
-                <div className="flex gap-2">
-                  <select 
-                    className="flex-1 bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
-                    value={newClass.semester || ''}
-                    onChange={e => setNewClass({...newClass, semester: parseInt(e.target.value) || 0})}
-                  >
-                    {[1,2,3,4,5,6].map(s => <option key={s} value={s}>Sem {s}</option>)}
-                  </select>
-                  <button onClick={handleAddClass} className="bg-cyan-600 p-2 rounded hover:bg-cyan-500 transition-colors"><Plus size={20} /></button>
-                </div>
+                <button onClick={handleAddClass} className="bg-cyan-600 p-2 rounded hover:bg-cyan-500 transition-colors flex items-center justify-center gap-2 font-mono text-xs font-bold">
+                  <Plus size={18} /> ADD CLASS
+                </button>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -105,7 +99,7 @@ export default function DepartmentDashboard() {
                   >
                     <div>
                       <div className="font-bold text-white group-hover:text-cyan-400 transition-colors">{c.name}</div>
-                      <div className="text-[10px] text-slate-500 font-mono">Year {c.year} • Semester {c.semester}</div>
+                      <div className="text-[10px] text-slate-500 font-mono">Academic Year {c.year}</div>
                     </div>
                     <ChevronRight size={18} className="text-slate-600 group-hover:text-cyan-400" />
                   </div>
@@ -123,26 +117,34 @@ export default function DepartmentDashboard() {
               <h2 className="font-mono font-bold text-white uppercase tracking-wider">Faculty Workload</h2>
             </div>
             <div className="p-6 space-y-4">
-              {staff.map(s => (
-                <div key={s.id} className="space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span className="font-medium text-slate-300">{s.name}</span>
-                    <span className="font-mono text-emerald-400 text-xs">{s.max_workload}h Max</span>
+              {staff.map(s => {
+                const workloadPercent = Math.min(100, (s.current_workload || 0) / s.max_workload * 100);
+                return (
+                  <div key={s.id} className="space-y-2">
+                    <div className="flex justify-between text-sm">
+                      <span className="font-medium text-slate-300">{s.name}</span>
+                      <span className="font-mono text-emerald-400 text-xs">
+                        {s.current_workload || 0}h / {s.max_workload}h Max
+                      </span>
+                    </div>
+                    <div className="h-2 bg-[#0a0e17] rounded-full overflow-hidden border border-[#1e2d47]">
+                      <div 
+                        className={clsx(
+                          "h-full transition-all duration-1000",
+                          workloadPercent > 100 ? "bg-red-500" : "bg-emerald-500"
+                        )}
+                        style={{ width: `${workloadPercent}%` }}
+                      ></div>
+                    </div>
+                    <button 
+                      onClick={() => navigate(`/staff/${s.id}`)}
+                      className="text-[10px] font-mono text-cyan-500 hover:text-cyan-400 uppercase tracking-wider"
+                    >
+                      View Timetable →
+                    </button>
                   </div>
-                  <div className="h-2 bg-[#0a0e17] rounded-full overflow-hidden border border-[#1e2d47]">
-                    <div 
-                      className="h-full bg-emerald-500 transition-all duration-1000" 
-                      style={{ width: '40%' }} // Placeholder for actual workload calc
-                    ></div>
-                  </div>
-                  <button 
-                    onClick={() => navigate(`/staff/${s.id}`)}
-                    className="text-[10px] font-mono text-cyan-500 hover:text-cyan-400 uppercase tracking-wider"
-                  >
-                    View Timetable →
-                  </button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </section>
         </div>

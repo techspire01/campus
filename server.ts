@@ -207,7 +207,8 @@ async function startServer() {
 
   app.get("/api/staff", (req, res) => {
     const staff = db.prepare(`
-      SELECT s.*, d.name as dept_name 
+      SELECT s.*, d.name as dept_name,
+             (SELECT COUNT(*) FROM timetable_slots WHERE staff_id = s.id) as current_workload
       FROM staff s 
       LEFT JOIN departments d ON s.dept_id = d.id
     `).all();
@@ -350,15 +351,164 @@ async function startServer() {
 
   app.post("/api/placement/blocks", (req, res) => {
     const { name, hours, class_ids } = req.body;
-    const stmt = db.prepare("INSERT INTO placement_blocks (name, hours) VALUES (?, ?)");
-    const info = stmt.run(name, hours);
-    const blockId = info.lastInsertRowid;
+    
+    const transaction = db.transaction(() => {
+      const stmt = db.prepare("INSERT INTO placement_blocks (name, hours) VALUES (?, ?)");
+      const info = stmt.run(name, hours);
+      const blockId = info.lastInsertRowid;
 
-    const insertClass = db.prepare("INSERT INTO placement_classes (placement_id, class_id) VALUES (?, ?)");
-    for (const classId of class_ids) {
-      insertClass.run(blockId, classId);
+      const insertClass = db.prepare("INSERT INTO placement_classes (placement_id, class_id) VALUES (?, ?)");
+      for (const classId of class_ids) {
+        insertClass.run(blockId, classId);
+      }
+
+      // Algorithm to find slots:
+      // We look for 'hours' consecutive free periods on any day for ALL classes in the block.
+      const periodsPerDay = parseInt((db.prepare("SELECT value FROM settings WHERE key = 'periods_per_day'").get() as any).value);
+      let assigned = false;
+
+      for (let day = 1; day <= 6; day++) {
+        for (let startP = 1; startP <= periodsPerDay - hours + 1; startP++) {
+          // Check if ALL classes are free for ALL periods in this block
+          let allFree = true;
+          for (const classId of class_ids) {
+            const occupied = db.prepare(`
+              SELECT 1 FROM timetable_slots 
+              WHERE class_id = ? AND day_order = ? AND period >= ? AND period < ?
+            `).get(classId, day, startP, startP + hours);
+            
+            if (occupied) {
+              allFree = false;
+              break;
+            }
+          }
+
+          if (allFree) {
+            // Assign!
+            const assignStmt = db.prepare(`
+              INSERT INTO timetable_slots (class_id, day_order, period, type, is_locked)
+              VALUES (?, ?, ?, 'placement', 1)
+            `);
+            for (const classId of class_ids) {
+              for (let p = startP; p < startP + hours; p++) {
+                assignStmt.run(classId, day, p);
+              }
+            }
+            assigned = true;
+            break;
+          }
+        }
+        if (assigned) break;
+      }
+
+      if (!assigned) {
+        throw new Error("Could not find a suitable time slot for this placement block across all selected classes.");
+      }
+
+      return blockId;
+    });
+
+    try {
+      const id = transaction();
+      res.json({ id });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
     }
-    res.json({ id: blockId });
+  });
+
+  app.delete("/api/placement/blocks/:id", (req, res) => {
+    const blockId = req.params.id;
+    
+    const transaction = db.transaction(() => {
+      // Get classes associated with this block
+      const classes = db.prepare("SELECT class_id FROM placement_classes WHERE placement_id = ?").all(blockId) as { class_id: number }[];
+      
+      // Remove from timetable_slots (only 'placement' type for these classes)
+      const deleteSlots = db.prepare(`
+        DELETE FROM timetable_slots 
+        WHERE class_id = ? AND type = 'placement'
+      `);
+      
+      for (const c of classes) {
+        deleteSlots.run(c.class_id);
+      }
+
+      db.prepare("DELETE FROM placement_classes WHERE placement_id = ?").run(blockId);
+      db.prepare("DELETE FROM placement_blocks WHERE id = ?").run(blockId);
+    });
+
+    transaction();
+    res.json({ success: true });
+  });
+
+  app.delete("/api/placement/blocks/:id/classes/:classId", (req, res) => {
+    const { id: blockId, classId } = req.params;
+    
+    try {
+      const transaction = db.transaction(() => {
+        // Remove from timetable_slots for this class
+        db.prepare(`
+          DELETE FROM timetable_slots 
+          WHERE class_id = ? AND type = 'placement'
+        `).run(classId);
+
+        // Remove from placement_classes
+        db.prepare(`
+          DELETE FROM placement_classes 
+          WHERE placement_id = ? AND class_id = ?
+        `).run(blockId, classId);
+
+        // If no classes left in block, delete the block
+        const remaining = db.prepare("SELECT COUNT(*) as count FROM placement_classes WHERE placement_id = ?").get(blockId) as { count: number };
+        if (remaining.count === 0) {
+          db.prepare("DELETE FROM placement_blocks WHERE id = ?").run(blockId);
+        }
+      });
+
+      transaction();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.patch("/api/timetable/move-slot", (req, res) => {
+    const { class_id, from_day, from_period, to_day, to_period } = req.body;
+    
+    try {
+      const transaction = db.transaction(() => {
+        // Get the slot at the source
+        const slot = db.prepare(`
+          SELECT * FROM timetable_slots 
+          WHERE class_id = ? AND day_order = ? AND period = ?
+        `).get(class_id, from_day, from_period) as any;
+
+        if (!slot) throw new Error("Source slot not found");
+
+        // Check if destination is occupied
+        const occupied = db.prepare(`
+          SELECT 1 FROM timetable_slots 
+          WHERE class_id = ? AND day_order = ? AND period = ?
+        `).get(class_id, to_day, to_period);
+
+        if (occupied) throw new Error("Destination slot is already occupied");
+
+        // If it's a placement slot, we might want to move the whole block, 
+        // but for now let's allow moving individual slots or handle them as individual units.
+        // The user asked to "adjust the slots".
+        
+        db.prepare(`
+          UPDATE timetable_slots 
+          SET day_order = ?, period = ?
+          WHERE id = ?
+        `).run(to_day, to_period, slot.id);
+      });
+
+      transaction();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
   });
 
   app.post("/api/timetable/generate", (req, res) => {

@@ -1,17 +1,28 @@
 import { useState, useEffect } from 'react';
-import { Briefcase, Plus, Users, CheckSquare, Square, Trash2 } from 'lucide-react';
-import { Class } from '../types';
+import { Briefcase, Plus, Users, CheckSquare, Square, Trash2, Filter } from 'lucide-react';
+import { Class, Department } from '../types';
 
 export default function PlacementManagement() {
   const [classes, setClasses] = useState<Class[]>([]);
+  const [depts, setDepts] = useState<Department[]>([]);
   const [selectedClasses, setSelectedClasses] = useState<number[]>([]);
   const [hours, setHours] = useState(3);
   const [placementBlocks, setPlacementBlocks] = useState<any[]>([]);
+  
+  const [filterYear, setFilterYear] = useState<number | 'all'>('all');
+  const [filterDept, setFilterDept] = useState<number | 'all'>('all');
 
   useEffect(() => {
     fetch('/api/classes').then(res => res.json()).then(setClasses);
-    // In a real app, fetch existing placement blocks
+    fetch('/api/departments').then(res => res.json()).then(setDepts);
+    fetch('/api/placement/blocks').then(res => res.json()).then(setPlacementBlocks);
   }, []);
+
+  const filteredClasses = classes.filter(c => {
+    const yearMatch = filterYear === 'all' || c.year === filterYear;
+    const deptMatch = filterDept === 'all' || c.dept_id === filterDept;
+    return yearMatch && deptMatch;
+  });
 
   const toggleClass = (id: number) => {
     if (selectedClasses.includes(id)) {
@@ -21,18 +32,45 @@ export default function PlacementManagement() {
     }
   };
 
-  const handleAddPlacement = () => {
+  const handleAddPlacement = async () => {
     if (selectedClasses.length === 0) return;
     
-    const newBlock = {
-      id: Date.now(),
-      classes: classes.filter(c => selectedClasses.includes(c.id)),
-      hours: hours
-    };
-    
-    setPlacementBlocks([...placementBlocks, newBlock]);
-    setSelectedClasses([]);
-    alert(`Placement block of ${hours} hours added for ${selectedClasses.length} classes.`);
+    const res = await fetch('/api/placement/blocks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Placement Training',
+        hours: hours,
+        class_ids: selectedClasses
+      })
+    });
+
+    if (res.ok) {
+      fetch('/api/placement/blocks').then(res => res.json()).then(setPlacementBlocks);
+      setSelectedClasses([]);
+      alert(`Placement block added successfully.`);
+    } else {
+      const err = await res.json();
+      alert(err.error || 'Failed to add placement block');
+    }
+  };
+
+  const handleDeleteBlock = async (id: number) => {
+    const res = await fetch(`/api/placement/blocks/${id}`, {
+      method: 'DELETE'
+    });
+    if (res.ok) {
+      setPlacementBlocks(placementBlocks.filter(b => b.id !== id));
+    }
+  };
+
+  const handleRemoveClassFromBlock = async (blockId: number, classId: number) => {
+    const res = await fetch(`/api/placement/blocks/${blockId}/classes/${classId}`, {
+      method: 'DELETE'
+    });
+    if (res.ok) {
+      fetch('/api/placement/blocks').then(res => res.json()).then(setPlacementBlocks);
+    }
   };
 
   return (
@@ -52,18 +90,60 @@ export default function PlacementManagement() {
             <h2 className="font-mono font-bold text-white uppercase tracking-wider">Placement Subjects</h2>
           </div>
           <div className="p-6 space-y-6">
-            <div className="flex justify-between items-center">
-              <span className="text-sm font-medium text-slate-300">Select Classes</span>
-              <button 
-                onClick={() => setSelectedClasses(selectedClasses.length === classes.length ? [] : classes.map(c => c.id))}
-                className="text-[10px] font-mono text-cyan-500 uppercase hover:text-cyan-400"
-              >
-                {selectedClasses.length === classes.length ? 'Deselect All' : 'Select All'}
-              </button>
+            <div className="flex flex-col gap-4">
+              <div className="flex justify-between items-center">
+                <span className="text-sm font-medium text-slate-300">Select Classes</span>
+                <button 
+                  onClick={() => {
+                    const filteredIds = filteredClasses.map(c => c.id);
+                    const allFilteredSelected = filteredIds.every(id => selectedClasses.includes(id));
+                    if (allFilteredSelected) {
+                      setSelectedClasses(selectedClasses.filter(id => !filteredIds.includes(id)));
+                    } else {
+                      setSelectedClasses([...new Set([...selectedClasses, ...filteredIds])]);
+                    }
+                  }}
+                  className="text-[10px] font-mono text-cyan-500 uppercase hover:text-cyan-400"
+                >
+                  {filteredClasses.length > 0 && filteredClasses.every(c => selectedClasses.includes(c.id)) ? 'Deselect Filtered' : 'Select Filtered'}
+                </button>
+              </div>
+
+              {/* Filters */}
+              <div className="grid grid-cols-2 gap-2 p-3 bg-[#0a0e17] border border-[#1e2d47] rounded-lg">
+                <div className="space-y-1">
+                  <label className="text-[9px] font-mono text-slate-500 uppercase tracking-widest flex items-center gap-1">
+                    <Filter size={10} /> Year
+                  </label>
+                  <select 
+                    className="w-full bg-[#141c2e] border border-[#1e2d47] rounded p-1 text-xs outline-none"
+                    value={filterYear}
+                    onChange={e => setFilterYear(e.target.value === 'all' ? 'all' : parseInt(e.target.value))}
+                  >
+                    <option value="all">All Years</option>
+                    <option value={1}>1st Year</option>
+                    <option value={2}>2nd Year</option>
+                    <option value={3}>3rd Year</option>
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[9px] font-mono text-slate-500 uppercase tracking-widest flex items-center gap-1">
+                    <Filter size={10} /> Dept
+                  </label>
+                  <select 
+                    className="w-full bg-[#141c2e] border border-[#1e2d47] rounded p-1 text-xs outline-none"
+                    value={filterDept}
+                    onChange={e => setFilterDept(e.target.value === 'all' ? 'all' : parseInt(e.target.value))}
+                  >
+                    <option value="all">All Depts</option>
+                    {depts.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                  </select>
+                </div>
+              </div>
             </div>
             
             <div className="bg-[#0a0e17] border border-[#1e2d47] rounded-lg max-h-60 overflow-y-auto p-2 space-y-1 custom-scrollbar">
-              {classes.map(c => (
+              {filteredClasses.map(c => (
                 <div 
                   key={c.id} 
                   onClick={() => toggleClass(c.id)}
@@ -74,9 +154,17 @@ export default function PlacementManagement() {
                   ) : (
                     <Square size={18} className="text-slate-600 group-hover:text-slate-400" />
                   )}
-                  <span className="text-sm font-medium">{c.name}</span>
+                  <div>
+                    <div className="text-sm font-medium">{c.name}</div>
+                    <div className="text-[9px] font-mono text-slate-500 uppercase">{c.dept_name} • Year {c.year}</div>
+                  </div>
                 </div>
               ))}
+              {filteredClasses.length === 0 && (
+                <div className="p-4 text-center text-xs text-slate-600 font-mono italic">
+                  No classes match the filters
+                </div>
+              )}
             </div>
 
             <div className="space-y-1">
@@ -101,31 +189,36 @@ export default function PlacementManagement() {
         {/* Assigned Blocks */}
         <section className="space-y-4">
           <div className="flex justify-between items-center">
-            <h3 className="text-sm font-mono font-bold text-slate-500 uppercase tracking-widest">Assigned Blocks for selected classes</h3>
-            {placementBlocks.length > 0 && (
-              <button 
-                onClick={() => setPlacementBlocks([])}
-                className="flex items-center gap-2 text-[10px] font-mono text-red-400 uppercase bg-red-400/10 px-3 py-1 rounded border border-red-400/20"
-              >
-                <Trash2 size={12} /> Remove All
-              </button>
-            )}
+            <h3 className="text-sm font-mono font-bold text-slate-500 uppercase tracking-widest">Assigned Blocks</h3>
           </div>
 
           <div className="space-y-4">
             {placementBlocks.map(block => (
               <div key={block.id} className="bg-[#0f1623] border border-[#1e2d47] p-6 rounded-xl space-y-4">
-                <div className="space-y-1">
-                  {block.classes.map((c: Class) => (
-                    <div key={c.id} className="text-sm font-bold text-white">{c.name}</div>
+                <div className="flex flex-wrap gap-2">
+                  {block.classes?.map((c: Class) => (
+                    <div key={c.id} className="group relative px-2 py-1 bg-cyan-500/10 border border-cyan-500/20 rounded text-[10px] font-mono text-cyan-400 flex items-center gap-2">
+                      {c.name}
+                      <button 
+                        onClick={() => handleRemoveClassFromBlock(block.id, c.id)}
+                        className="text-red-400 hover:text-red-300 opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="Remove class from block"
+                      >
+                        ×
+                      </button>
+                    </div>
                   ))}
                 </div>
                 <div className="bg-[#141c2e] p-4 rounded-lg flex justify-between items-center border border-[#1e2d47]">
                   <div>
-                    <div className="font-bold text-white">Placement Training</div>
+                    <div className="font-bold text-white">{block.name}</div>
                     <div className="text-[10px] text-slate-500 font-mono">{block.hours} continuous hours/week</div>
                   </div>
-                  <button className="text-slate-600 hover:text-red-400 transition-colors">
+                  <button 
+                    onClick={() => handleDeleteBlock(block.id)}
+                    className="text-slate-600 hover:text-red-400 transition-colors p-2 hover:bg-red-400/10 rounded-lg"
+                    title="Delete block and clear slots"
+                  >
                     <Trash2 size={18} />
                   </button>
                 </div>

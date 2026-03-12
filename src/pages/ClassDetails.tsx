@@ -185,12 +185,21 @@ export default function ClassDetails() {
                           <td key={period} className="p-2">
                             <div className={clsx(
                               "min-h-[80px] p-2 rounded border transition-all flex flex-col justify-center items-center text-center gap-1",
-                              slot ? (slot.is_locked ? "bg-orange-500/5 border-orange-500/20" : "bg-cyan-500/5 border-cyan-500/20") : "bg-[#0a0e17] border-dashed border-[#1e2d47]"
+                              slot ? (
+                                slot.type === 'placement' 
+                                  ? "bg-emerald-500/10 border-emerald-500/30 shadow-[inset_0_0_10px_rgba(16,185,129,0.05)]" 
+                                  : slot.is_locked ? "bg-orange-500/5 border-orange-500/20" : "bg-cyan-500/5 border-cyan-500/20"
+                              ) : "bg-[#0a0e17] border-dashed border-[#1e2d47]"
                             )}>
                               {slot ? (
                                 <>
-                                  <div className="font-bold text-white text-xs">{slot.subject_code}</div>
-                                  <div className="text-[10px] text-slate-500">{slot.staff_name}</div>
+                                  <div className={clsx(
+                                    "font-bold text-xs",
+                                    slot.type === 'placement' ? "text-emerald-400" : "text-white"
+                                  )}>
+                                    {slot.type === 'placement' ? 'PLACEMENT' : slot.subject_code}
+                                  </div>
+                                  {slot.type !== 'placement' && <div className="text-[10px] text-slate-500">{slot.staff_name}</div>}
                                   {slot.lab_name && <div className="text-[9px] text-emerald-400 font-mono">{slot.lab_name}</div>}
                                 </>
                               ) : (

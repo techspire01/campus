@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect, Fragment } from 'react';
 import { useParams } from 'react-router-dom';
 import { Class, TimetableSlot, Settings } from '../types';
 import { Calendar, Clock, GraduationCap } from 'lucide-react';
@@ -29,7 +29,7 @@ export default function StudentTimetable() {
         <div>
           <div className="text-[10px] font-mono text-cyan-500 uppercase tracking-[0.2em] mb-1">Student View</div>
           <h1 className="text-4xl font-mono font-bold text-white tracking-tighter uppercase">{cls.name}</h1>
-          <p className="text-slate-500 mt-2">Year {cls.year} • Semester {cls.semester} • {cls.dept_name}</p>
+          <p className="text-slate-500 mt-2">Academic Year {cls.year} • {cls.dept_name}</p>
         </div>
       </header>
 
@@ -44,8 +44,8 @@ export default function StudentTimetable() {
               <tr>
                 <th className="p-3 text-left text-[10px] font-mono text-slate-500 uppercase border-b border-[#1e2d47]">Day Order</th>
                 {periods.map(p => (
-                  <>
-                    <th key={p} className="p-3 text-center text-[10px] font-mono text-slate-500 uppercase border-b border-[#1e2d47]">
+                  <Fragment key={`p-header-${p}`}>
+                    <th className="p-3 text-center text-[10px] font-mono text-slate-500 uppercase border-b border-[#1e2d47]">
                       Period {p}
                     </th>
                     {p === parseInt(settings.break_after_period) && (
@@ -58,7 +58,7 @@ export default function StudentTimetable() {
                         Lunch
                       </th>
                     )}
-                  </>
+                  </Fragment>
                 ))}
               </tr>
             </thead>
@@ -69,16 +69,25 @@ export default function StudentTimetable() {
                   {periods.map(period => {
                     const slot = timetable.find(s => s.day_order === day && s.period === period);
                     return (
-                      <>
-                        <td key={period} className="p-2">
+                      <Fragment key={`cell-${day}-${period}`}>
+                        <td className="p-2">
                           <div className={clsx(
                             "min-h-[80px] p-2 rounded border transition-all flex flex-col justify-center items-center text-center gap-1",
-                            slot ? "bg-cyan-500/5 border-cyan-500/20" : "bg-transparent border-transparent"
+                            slot ? (
+                              slot.type === 'placement'
+                                ? "bg-emerald-500/10 border-emerald-500/30 shadow-[inset_0_0_10px_rgba(16,185,129,0.05)]"
+                                : "bg-cyan-500/5 border-cyan-500/20"
+                            ) : "bg-transparent border-transparent"
                           )}>
                             {slot ? (
                               <>
-                                <div className="font-bold text-white text-xs">{slot.subject_name}</div>
-                                <div className="text-[10px] text-cyan-400 font-mono">{slot.subject_code}</div>
+                                <div className={clsx(
+                                  "font-bold text-xs",
+                                  slot.type === 'placement' ? "text-emerald-400" : "text-white"
+                                )}>
+                                  {slot.type === 'placement' ? 'PLACEMENT' : slot.subject_name}
+                                </div>
+                                <div className="text-[10px] text-cyan-400 font-mono">{slot.type === 'placement' ? 'TRAINING' : slot.subject_code}</div>
                                 {slot.lab_name && <div className="text-[9px] text-emerald-400 font-mono uppercase tracking-tighter">{slot.lab_name}</div>}
                               </>
                             ) : (
@@ -100,7 +109,7 @@ export default function StudentTimetable() {
                             </div>
                           </td>
                         )}
-                      </>
+                      </Fragment>
                     );
                   })}
                 </tr>

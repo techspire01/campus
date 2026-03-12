@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect, Fragment } from 'react';
 import { useParams } from 'react-router-dom';
 import { Staff, TimetableSlot, Settings } from '../types';
 import { Clock, User, Calendar, CheckCircle2 } from 'lucide-react';
@@ -70,8 +70,8 @@ export default function StaffTimetable() {
               <tr>
                 <th className="p-3 text-left text-[10px] font-mono text-slate-500 uppercase border-b border-[#1e2d47]">Day Order</th>
                 {periods.map(p => (
-                  <>
-                    <th key={p} className="p-3 text-center text-[10px] font-mono text-slate-500 uppercase border-b border-[#1e2d47]">
+                  <Fragment key={`p-header-${p}`}>
+                    <th className="p-3 text-center text-[10px] font-mono text-slate-500 uppercase border-b border-[#1e2d47]">
                       Period {p}
                     </th>
                     {p === parseInt(settings.break_after_period) && (
@@ -84,7 +84,7 @@ export default function StaffTimetable() {
                         Lunch
                       </th>
                     )}
-                  </>
+                  </Fragment>
                 ))}
               </tr>
             </thead>
@@ -95,8 +95,8 @@ export default function StaffTimetable() {
                   {periods.map(period => {
                     const slot = timetable.find(s => s.day_order === day && s.period === period);
                     return (
-                      <>
-                        <td key={period} className="p-2">
+                      <Fragment key={`cell-${day}-${period}`}>
+                        <td className="p-2">
                           <div className={clsx(
                             "min-h-[80px] p-2 rounded border transition-all flex flex-col justify-center items-center text-center gap-1",
                             slot ? "bg-emerald-500/5 border-emerald-500/20" : "bg-[#0a0e17] border-dashed border-[#1e2d47]"
@@ -126,7 +126,7 @@ export default function StaffTimetable() {
                             </div>
                           </td>
                         )}
-                      </>
+                      </Fragment>
                     );
                   })}
                 </tr>
