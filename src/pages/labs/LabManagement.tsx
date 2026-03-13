@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react';
+import { FlaskConical, Plus, Trash2, Monitor, Building2, ClipboardList, Calendar } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { FlaskConical, Plus, Trash2, Monitor, Building2, CheckCircle2, Calendar } from 'lucide-react';
-import { Department, Class } from '../types';
+import { Department, LabOverviewItem } from '../../types';
 
 export default function LabManagement() {
   const navigate = useNavigate();
   const [labs, setLabs] = useState<any[]>([]);
   const [depts, setDepts] = useState<Department[]>([]);
+  const [actionCount, setActionCount] = useState(0); // not_submitted + pending
   const [newLab, setNewLab] = useState({
     name: '',
     dept_id: '',
@@ -16,10 +17,17 @@ export default function LabManagement() {
   });
   const [status, setStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
 
-  useEffect(() => {
+  const loadData = () => {
     fetch('/api/labs').then(res => res.json()).then(setLabs);
     fetch('/api/departments').then(res => res.json()).then(setDepts);
-  }, []);
+    fetch('/api/lab-requirements/overview')
+      .then(res => res.json())
+      .then((items: LabOverviewItem[]) =>
+        setActionCount(items.filter(i => i.status !== 'assigned').length)
+      );
+  };
+
+  useEffect(() => { loadData(); }, []);
 
   const handleAddLab = async () => {
     setStatus(null);
@@ -36,29 +44,21 @@ export default function LabManagement() {
       setStatus({ type: 'error', msg: data.error || 'Failed to create lab.' });
       return;
     }
-
-    setLabs([...labs, { ...newLab, id: data.id } as any]);
+    setLabs(prev => [...prev, { ...newLab, id: data.id } as any]);
     setNewLab({ name: '', dept_id: '', systems_count: 30, systems_specification: '', os_installed: '' });
     setStatus({ type: 'success', msg: 'Lab created successfully.' });
   };
 
   const handleDeleteLab = async (labId: number) => {
     setStatus(null);
-
-    const shouldDelete = window.confirm('Delete this lab?');
-    if (!shouldDelete) return;
-
-    const res = await fetch(`/api/labs/${labId}`, {
-      method: 'DELETE'
-    });
+    if (!window.confirm('Delete this lab?')) return;
+    const res = await fetch(`/api/labs/${labId}`, { method: 'DELETE' });
     const data = await res.json();
-
     if (!res.ok) {
       setStatus({ type: 'error', msg: data.error || 'Failed to delete lab.' });
       return;
     }
-
-    setLabs(current => current.filter(lab => lab.id !== labId));
+    setLabs(prev => prev.filter(l => l.id !== labId));
     setStatus({ type: 'success', msg: 'Lab deleted successfully.' });
   };
 
@@ -69,6 +69,18 @@ export default function LabManagement() {
           <h1 className="text-4xl font-mono font-bold text-white tracking-tighter uppercase">Laboratory Management</h1>
           <p className="text-slate-500 mt-2">Define lab resources and manage system availability for practical sessions.</p>
         </div>
+        <button
+          onClick={() => navigate('/labs/requests')}
+          className="relative inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-[#141c2e] border border-[#1e2d47] text-sm font-mono font-bold text-slate-200 hover:border-cyan-500/50 hover:text-cyan-400 transition-all uppercase tracking-wider"
+        >
+          <ClipboardList size={16} />
+          Lab Requests
+          {actionCount > 0 && (
+            <span className="absolute -top-2 -right-2 min-w-[20px] h-5 px-1 rounded-full bg-amber-500 text-[10px] font-bold text-black flex items-center justify-center">
+              {actionCount}
+            </span>
+          )}
+        </button>
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -90,19 +102,19 @@ export default function LabManagement() {
             )}
             <div className="space-y-1">
               <label className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Lab Name</label>
-              <input 
-                placeholder="e.g. CS Lab 1" 
+              <input
+                placeholder="e.g. CS Lab 1"
                 className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none focus:border-emerald-500"
                 value={newLab.name}
-                onChange={e => setNewLab({...newLab, name: e.target.value})}
+                onChange={e => setNewLab({ ...newLab, name: e.target.value })}
               />
             </div>
             <div className="space-y-1">
               <label className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Department</label>
-              <select 
+              <select
                 className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
                 value={newLab.dept_id}
-                onChange={e => setNewLab({...newLab, dept_id: e.target.value})}
+                onChange={e => setNewLab({ ...newLab, dept_id: e.target.value })}
               >
                 <option value="">Common Lab</option>
                 {depts.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
@@ -110,11 +122,11 @@ export default function LabManagement() {
             </div>
             <div className="space-y-1">
               <label className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Systems Available</label>
-              <input 
+              <input
                 type="number"
                 className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
                 value={newLab.systems_count || ''}
-                onChange={e => setNewLab({...newLab, systems_count: parseInt(e.target.value) || 0})}
+                onChange={e => setNewLab({ ...newLab, systems_count: parseInt(e.target.value) || 0 })}
               />
             </div>
             <div className="space-y-1">
@@ -136,7 +148,7 @@ export default function LabManagement() {
                 onChange={e => setNewLab({ ...newLab, os_installed: e.target.value })}
               />
             </div>
-            <button 
+            <button
               onClick={handleAddLab}
               className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-mono font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-all mt-4"
             >
@@ -147,6 +159,12 @@ export default function LabManagement() {
 
         {/* Labs List */}
         <div className="lg:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-6">
+          {labs.length === 0 && (
+            <div className="md:col-span-2 flex flex-col items-center justify-center py-16 text-slate-500">
+              <FlaskConical size={40} className="mb-3 opacity-30" />
+              <p className="font-mono text-sm uppercase tracking-wider">No labs registered yet</p>
+            </div>
+          )}
           {labs.map(lab => (
             <div
               key={lab.id}
@@ -167,16 +185,15 @@ export default function LabManagement() {
                 <Building2 size={12} />
                 {depts.find(d => d.id === lab.dept_id)?.name || 'Common'}
               </div>
-              
               <div className="mt-6 pt-6 border-t border-[#1e2d47] flex justify-between items-center">
                 <button
                   onClick={e => {
                     e.stopPropagation();
                     navigate(`/labs/${lab.id}`);
                   }}
-                  className="flex items-center gap-1.5 text-xs font-mono text-cyan-400 hover:text-cyan-300 transition-colors"
+                  className="flex items-center gap-2 text-cyan-400 text-xs font-mono hover:text-cyan-300 transition-colors"
                 >
-                  <Calendar size={13} /> VIEW TIMETABLE
+                  <Calendar size={14} /> OPEN LAB PAGE
                 </button>
                 <button
                   onClick={e => {

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Clock, FlaskConical, Plus, X } from 'lucide-react';
+import { ArrowLeft, Clock, FlaskConical, Plus, X, Lock, Send } from 'lucide-react';
 import { clsx } from 'clsx';
-import { Class, ClassSubject, Settings, Staff, Subject, TimetableSlot } from '../types';
+import { Class, ClassSubject, LabRequirement, Settings, Staff, Subject, TimetableSlot } from '../types';
 
 type CreateSubjectForm = {
   name: string;
@@ -52,6 +52,15 @@ export default function ClassDetails() {
   });
   const [status, setStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
 
+  // Lab requirement request state
+  const [labReqs, setLabReqs] = useState<LabRequirement[]>([]);
+  const [showLabReqModal, setShowLabReqModal] = useState(false);
+  const [labReqSubjectId, setLabReqSubjectId] = useState<number | null>(null);
+  const [labReqSubjectName, setLabReqSubjectName] = useState('');
+  const [labReqForm, setLabReqForm] = useState({ requirements: '' });
+  const [labReqLoading, setLabReqLoading] = useState(false);
+  const [deletingLabReqId, setDeletingLabReqId] = useState<number | null>(null);
+
   const refreshData = () => {
     fetch('/api/classes').then(res => res.json()).then(data => {
       setCls(data.find((x: Class) => x.id === parseInt(id || '0', 10)) || null);
@@ -61,6 +70,7 @@ export default function ClassDetails() {
     fetch('/api/staff').then(res => res.json()).then(setAllStaff);
     fetch(`/api/timetable/${id}`).then(res => res.json()).then(setTimetable);
     fetch('/api/settings').then(res => res.json()).then(setSettings);
+    fetch(`/api/lab-requirements?class_id=${id}`).then(res => res.json()).then(setLabReqs);
   };
 
   useEffect(() => {
@@ -303,19 +313,61 @@ export default function ClassDetails() {
     }
   };
 
-  const labRequirements = useMemo(() => {
+  const handleOpenLabReqModal = (cs: ClassSubject) => {
+    setLabReqSubjectId(cs.subject_id);
+    setLabReqSubjectName(cs.subject_name);
+    setLabReqForm({ requirements: '' });
+    setShowLabReqModal(true);
+  };
+
+  const handleSubmitLabReq = async () => {
+    if (!id || !labReqSubjectId) return;
+    setLabReqLoading(true);
+    setStatus(null);
+    const res = await fetch('/api/lab-requirements', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        class_id: parseInt(id, 10),
+        subject_id: labReqSubjectId,
+        requirements: labReqForm.requirements || null
+      })
+    });
+    setLabReqLoading(false);
+    if (res.ok) {
+      setShowLabReqModal(false);
+      refreshData();
+      setStatus({ type: 'success', msg: 'Lab request submitted to lab management.' });
+    } else {
+      const err = await res.json();
+      setStatus({ type: 'error', msg: err.error || 'Failed to submit lab request.' });
+    }
+  };
+
+  const handleDeleteLabReq = async (reqId: number) => {
+    if (!window.confirm('Cancel this lab request?')) return;
+    setDeletingLabReqId(reqId);
+    setStatus(null);
+    const res = await fetch(`/api/lab-requirements/${reqId}`, { method: 'DELETE' });
+    setDeletingLabReqId(null);
+    if (res.ok) {
+      refreshData();
+      setStatus({ type: 'success', msg: 'Lab request cancelled.' });
+    } else {
+      const err = await res.json();
+      setStatus({ type: 'error', msg: err.error || 'Failed to cancel lab request.' });
+    }
+  };
+
+  // Lab subjects from classSubjects with their request status
+  const labSubjects = useMemo(() => {
     return classSubjects
       .filter(cs => cs.is_lab_required)
-      .map(cs => {
-        const allocated = timetable.some(
-          slot => slot.subject_id === cs.subject_id && slot.type === 'lab' && !!slot.lab_id
-        );
-        return {
-          ...cs,
-          allocated
-        };
-      });
-  }, [classSubjects, timetable]);
+      .map(cs => ({
+        ...cs,
+        labReq: labReqs.find(r => r.subject_id === cs.subject_id) ?? null
+      }));
+  }, [classSubjects, labReqs]);
 
   if (!cls || !settings) {
     return <div className="text-slate-300">Loading class details...</div>;
@@ -514,34 +566,94 @@ export default function ClassDetails() {
       </section>
 
       <section className="rounded-xl border border-[#1e2d47] bg-[#0f1623] p-5">
-        <h2 className="text-lg font-semibold text-white mb-4">Lab Requirements</h2>
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <FlaskConical size={18} className="text-cyan-400" />
+            <h2 className="text-lg font-semibold text-white">Lab Requirements</h2>
+          </div>
+        </div>
+
+        {labSubjects.length === 0 && (
+          <p className="text-sm text-slate-400">No lab subjects assigned to this class.</p>
+        )}
+
         <div className="space-y-3">
-          {labRequirements.map(lab => (
-            <div key={lab.id} className="rounded-lg border border-[#243550] bg-[#141c2e] p-4 flex items-center justify-between gap-4">
-              <div className="flex items-start gap-3">
-                <FlaskConical size={18} className="text-cyan-400 mt-0.5" />
-                <div>
-                  <p className="text-sm font-semibold text-white">
-                    {lab.subject_name} ({lab.subject_code})
-                  </p>
-                  <p className="text-xs text-slate-400">Systems needed: {cls.student_strength}</p>
-                  <p className="text-xs text-slate-400">Preferred block: 2 periods</p>
+          {labSubjects.map(cs => {
+            const req = cs.labReq;
+            return (
+              <div
+                key={cs.id}
+                className={clsx(
+                  'rounded-lg border p-4',
+                  req?.status === 'assigned'
+                    ? 'border-emerald-500/25 bg-emerald-500/5'
+                    : req?.status === 'pending'
+                    ? 'border-amber-500/25 bg-amber-500/5'
+                    : 'border-[#243550] bg-[#141c2e]'
+                )}
+              >
+                <div className="flex items-center justify-between gap-4 flex-wrap">
+                  <div className="flex items-start gap-3">
+                    <FlaskConical
+                      size={17}
+                      className={clsx(
+                        'mt-0.5',
+                        req?.status === 'assigned' ? 'text-emerald-400' : req?.status === 'pending' ? 'text-amber-400' : 'text-cyan-400'
+                      )}
+                    />
+                    <div>
+                      <p className="text-sm font-semibold text-white">{cs.subject_name} <span className="text-slate-500 font-normal">({cs.subject_code})</span></p>
+                      {req && (
+                        <p className="text-xs text-slate-400 mt-0.5">
+                          {cs.hours_per_week}h/week
+                          {req.requirements && <span className="ml-2 italic text-slate-500">· {req.requirements}</span>}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {req?.status === 'assigned' && (
+                      <>
+                        <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/20">
+                          <Lock size={11} className="text-emerald-400" />
+                          <span className="text-xs font-mono font-bold text-emerald-300">{req.lab_name}</span>
+                        </div>
+                        <span className="text-xs px-2 py-1 rounded bg-emerald-700/20 text-emerald-300">Assigned</span>
+                        <button
+                          onClick={() => handleDeleteLabReq(req.id)}
+                          disabled={deletingLabReqId === req.id}
+                          className="text-xs px-2 py-1 rounded border border-red-500/20 text-red-400 hover:bg-red-500/10 disabled:opacity-50 transition-colors"
+                        >
+                          {deletingLabReqId === req.id ? '…' : 'Release'}
+                        </button>
+                      </>
+                    )}
+                    {req?.status === 'pending' && (
+                      <>
+                        <span className="text-xs px-2 py-1 rounded bg-amber-700/20 text-amber-300">Pending Assignment</span>
+                        <button
+                          onClick={() => handleDeleteLabReq(req.id)}
+                          disabled={deletingLabReqId === req.id}
+                          className="text-xs px-2 py-1 rounded border border-[#2a3a57] text-slate-400 hover:text-white disabled:opacity-50 transition-colors"
+                        >
+                          {deletingLabReqId === req.id ? '…' : 'Cancel'}
+                        </button>
+                      </>
+                    )}
+                    {!req && (
+                      <button
+                        onClick={() => handleOpenLabReqModal(cs)}
+                        className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-medium transition-colors"
+                      >
+                        <Send size={11} /> Request Lab
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
-              <span
-                className={
-                  lab.allocated
-                    ? 'text-xs px-2 py-1 rounded bg-emerald-700/20 text-emerald-300'
-                    : 'text-xs px-2 py-1 rounded bg-amber-700/20 text-amber-300'
-                }
-              >
-                {lab.allocated ? 'Allocated' : 'Pending'}
-              </span>
-            </div>
-          ))}
-          {labRequirements.length === 0 && (
-            <p className="text-sm text-slate-400">No lab requirements for this class.</p>
-          )}
+            );
+          })}
         </div>
       </section>
 
@@ -696,6 +808,52 @@ export default function ClassDetails() {
                 className="px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-700 text-sm text-white"
               >
                 Create & Assign
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Request Lab Modal */}
+      {showLabReqModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-xl border border-[#2a3a57] bg-[#0f1623] p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-white">Request Lab Assignment</h3>
+                <p className="text-xs text-slate-400 mt-0.5">{labReqSubjectName}</p>
+              </div>
+              <button onClick={() => setShowLabReqModal(false)} className="text-slate-400 hover:text-white">
+                <X size={18} />
+              </button>
+            </div>
+            <p className="text-xs text-slate-500 rounded-lg bg-cyan-500/5 border border-cyan-500/10 px-3 py-2">
+              This request will appear in <strong className="text-slate-300">Lab Management → Lab Requests</strong> where an admin can assign a physical lab.
+              Once assigned, the lab cannot be changed without deleting this request.
+            </p>
+            <div>
+              <label className="text-xs text-slate-400">Special Requirements <span className="text-slate-600">(optional)</span></label>
+              <textarea
+                rows={2}
+                placeholder="e.g. requires 60 systems, projector needed..."
+                className="w-full mt-1 px-3 py-2 rounded-md border border-[#2a3a57] bg-[#0a0e17] text-sm resize-none"
+                value={labReqForm.requirements}
+                onChange={e => setLabReqForm(f => ({ ...f, requirements: e.target.value }))}
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                onClick={() => setShowLabReqModal(false)}
+                className="px-4 py-2 rounded-md border border-[#2a3a57] text-sm text-slate-200"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSubmitLabReq}
+                disabled={labReqLoading}
+                className="px-4 py-2 rounded-md bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-sm text-white flex items-center gap-2"
+              >
+                {labReqLoading ? 'Submitting…' : <><Send size={14} /> Submit Request</>}
               </button>
             </div>
           </div>

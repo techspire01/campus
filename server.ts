@@ -11,22 +11,6 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-const departmentsToSeed = [
-  { name: 'B.Com', type: 'core', years: 3 },
-  { name: 'B.Com CA', type: 'core', years: 3 },
-  { name: 'B.Com PA', type: 'core', years: 3 },
-  { name: 'B.Com IT', type: 'core', years: 3 },
-  { name: 'BBA CA', type: 'core', years: 3 },
-  { name: 'B.Sc CSHM', type: 'core', years: 3 },
-  { name: 'B.Sc CS', type: 'core', years: 3 },
-  { name: 'B.Sc AI & ML', type: 'core', years: 3 },
-  { name: 'B.Sc CSDA', type: 'core', years: 3 },
-  { name: 'B.Sc IT', type: 'core', years: 3 },
-  { name: 'MBA', type: 'core', years: 2 },
-  { name: 'M.Sc CS', type: 'core', years: 2 },
-  { name: 'M.Com', type: 'core', years: 2 }
-];
-
 async function ensureSchema() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS cg_settings (
@@ -81,7 +65,9 @@ async function ensureSchema() {
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL UNIQUE,
       dept_id INTEGER REFERENCES cg_departments(id) ON DELETE SET NULL,
-      systems_count INTEGER NOT NULL
+      systems_count INTEGER NOT NULL,
+      systems_specification TEXT,
+      os_installed TEXT
     );
 
     CREATE TABLE IF NOT EXISTS cg_lab_requirements (
@@ -132,150 +118,31 @@ async function ensureSchema() {
     ALTER TABLE cg_timetable_slots
     ADD COLUMN IF NOT EXISTS placement_block_id INTEGER REFERENCES cg_placement_blocks(id) ON DELETE CASCADE;
   `);
-}
 
-async function seedDefaults() {
-  const defaults = {
-    college_start_time: '09:45',
-    college_end_time: '15:45',
-    periods_per_day: '6',
-    break_duration: '15',
-    break_after_period: '2',
-    lunch_duration: '45',
-    lunch_after_period: '3'
-  } as Record<string, string>;
-
-  for (const [key, value] of Object.entries(defaults)) {
-    await pool.query(
-      'INSERT INTO cg_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING',
-      [key, value]
-    );
-  }
-
-  for (const dept of departmentsToSeed) {
-    const deptInsert = await pool.query(
-      'INSERT INTO cg_departments (name, type) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id',
-      [dept.name, dept.type]
-    );
-    const deptId = deptInsert.rows[0].id as number;
-
-    await pool.query(
-      `INSERT INTO cg_staff (name, role, dept_id, max_workload)
-       VALUES ($1, 'HOD', $2, 12)
-       ON CONFLICT DO NOTHING`,
-      [`Dr. HOD ${dept.name}`, deptId]
-    );
-
-    for (let i = 1; i <= 4; i++) {
-      await pool.query(
-        `INSERT INTO cg_staff (name, role, dept_id, max_workload)
-         VALUES ($1, 'Staff', $2, 18)
-         ON CONFLICT DO NOTHING`,
-        [`Prof. ${dept.name} Staff ${i}`, deptId]
-      );
-    }
-
-    for (let y = 1; y <= dept.years; y++) {
-      await pool.query(
-        `INSERT INTO cg_classes (name, dept_id, year, semester)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (name) DO NOTHING`,
-        [`${y} ${dept.name}`, deptId, y, y * 2 - 1]
-      );
-    }
-  }
-}
-
-async function seedLabSubjects() {
-  // Insert all lab subjects (idempotent via ON CONFLICT (code) DO NOTHING)
   await pool.query(`
-    INSERT INTO cg_subjects (name, code, type, is_addon) VALUES
-      ('Office Automation (Lab)',           'OFFICE-AUTO-LAB',   'lab', false),
-      ('Programming in C (Lab)',            'PROG-C-LAB',        'lab', false),
-      ('Database Management System (Lab)',  'DBMS-LAB',          'lab', false),
-      ('Web Technology (Lab)',              'WEB-TECH-LAB',      'lab', false),
-      ('Accounting Software (Lab)',         'ACCT-SW-LAB',       'lab', false),
-      ('Python Programming (Lab)',          'PYTHON-LAB',        'lab', false),
-      ('Food Production (Lab)',             'FOOD-PROD-LAB',     'lab', false),
-      ('Data Structures (Lab)',             'DS-LAB',            'lab', false),
-      ('Java Programming (Lab)',            'JAVA-LAB',          'lab', false),
-      ('Machine Learning (Lab)',            'ML-LAB',            'lab', false),
-      ('Advanced Office Suite (Lab)',       'ADV-OFFICE-LAB',    'lab', false),
-      ('Digital Marketing Analytics (Lab)', 'DIG-MKTG-LAB',     'lab', false),
-      ('Big Data Analytics (Lab)',          'BIG-DATA-LAB',      'lab', false),
-      ('Advanced Data Structures (Lab)',    'ADV-DS-LAB',        'lab', false),
-      ('Advanced Java Programming (Lab)',   'ADV-JAVA-LAB',      'lab', false),
-      ('Project Lab',                       'PROJECT-LAB',       'lab', false)
-    ON CONFLICT (code) DO NOTHING
+    ALTER TABLE cg_lab_requirements
+    ADD COLUMN IF NOT EXISTS lab_id INTEGER REFERENCES cg_labs(id) ON DELETE SET NULL;
   `);
 
-  // Assign lab subjects to classes
-  // 1st/2nd year labs = 5 hrs/week, 3rd year labs = 6 hrs/week
-  const assignments: Array<{ className: string; subjectCode: string; hours: number }> = [
-    // B.Com — no specific labs, only project lab for 3rd year
-    { className: '3 B.Com',         subjectCode: 'PROJECT-LAB',     hours: 6 },
-    // B.Com CA
-    { className: '1 B.Com CA',      subjectCode: 'OFFICE-AUTO-LAB', hours: 5 },
-    { className: '2 B.Com CA',      subjectCode: 'PROG-C-LAB',      hours: 5 },
-    { className: '2 B.Com CA',      subjectCode: 'DBMS-LAB',        hours: 5 },
-    { className: '3 B.Com CA',      subjectCode: 'WEB-TECH-LAB',    hours: 6 },
-    { className: '3 B.Com CA',      subjectCode: 'PROJECT-LAB',     hours: 6 },
-    // B.Com PA
-    { className: '3 B.Com PA',      subjectCode: 'ACCT-SW-LAB',     hours: 6 },
-    { className: '3 B.Com PA',      subjectCode: 'PROJECT-LAB',     hours: 6 },
-    // B.Com IT
-    { className: '1 B.Com IT',      subjectCode: 'PROG-C-LAB',      hours: 5 },
-    { className: '2 B.Com IT',      subjectCode: 'DBMS-LAB',        hours: 5 },
-    { className: '2 B.Com IT',      subjectCode: 'WEB-TECH-LAB',    hours: 5 },
-    { className: '3 B.Com IT',      subjectCode: 'PROJECT-LAB',     hours: 6 },
-    // BBA CA
-    { className: '1 BBA CA',        subjectCode: 'OFFICE-AUTO-LAB', hours: 5 },
-    { className: '2 BBA CA',        subjectCode: 'PYTHON-LAB',      hours: 5 },
-    { className: '3 BBA CA',        subjectCode: 'WEB-TECH-LAB',    hours: 6 },
-    { className: '3 BBA CA',        subjectCode: 'PROJECT-LAB',     hours: 6 },
-    // B.Sc CSHM
-    { className: '1 B.Sc CSHM',     subjectCode: 'FOOD-PROD-LAB',   hours: 5 },
-    { className: '2 B.Sc CSHM',     subjectCode: 'WEB-TECH-LAB',    hours: 5 },
-    { className: '3 B.Sc CSHM',     subjectCode: 'PROJECT-LAB',     hours: 6 },
-    // B.Sc CS
-    { className: '1 B.Sc CS',       subjectCode: 'PROG-C-LAB',      hours: 5 },
-    { className: '2 B.Sc CS',       subjectCode: 'DS-LAB',          hours: 5 },
-    { className: '2 B.Sc CS',       subjectCode: 'DBMS-LAB',        hours: 5 },
-    { className: '3 B.Sc CS',       subjectCode: 'JAVA-LAB',        hours: 6 },
-    { className: '3 B.Sc CS',       subjectCode: 'PROJECT-LAB',     hours: 6 },
-    // B.Sc AI & ML
-    { className: '1 B.Sc AI & ML',  subjectCode: 'PYTHON-LAB',      hours: 5 },
-    { className: '2 B.Sc AI & ML',  subjectCode: 'DS-LAB',          hours: 5 },
-    { className: '3 B.Sc AI & ML',  subjectCode: 'ML-LAB',          hours: 6 },
-    { className: '3 B.Sc AI & ML',  subjectCode: 'PROJECT-LAB',     hours: 6 },
-    // B.Sc CSDA
-    { className: '1 B.Sc CSDA',     subjectCode: 'JAVA-LAB',        hours: 5 },
-    { className: '1 B.Sc CSDA',     subjectCode: 'ADV-OFFICE-LAB',  hours: 5 },
-    { className: '2 B.Sc CSDA',     subjectCode: 'DIG-MKTG-LAB',    hours: 5 },
-    { className: '3 B.Sc CSDA',     subjectCode: 'BIG-DATA-LAB',    hours: 6 },
-    { className: '3 B.Sc CSDA',     subjectCode: 'PROJECT-LAB',     hours: 6 },
-    // B.Sc IT
-    { className: '1 B.Sc IT',       subjectCode: 'PROG-C-LAB',      hours: 5 },
-    { className: '2 B.Sc IT',       subjectCode: 'DS-LAB',          hours: 5 },
-    { className: '2 B.Sc IT',       subjectCode: 'DBMS-LAB',        hours: 5 },
-    { className: '3 B.Sc IT',       subjectCode: 'WEB-TECH-LAB',    hours: 6 },
-    { className: '3 B.Sc IT',       subjectCode: 'PROJECT-LAB',     hours: 6 },
-    // M.Sc CS
-    { className: '1 M.Sc CS',       subjectCode: 'ADV-DS-LAB',      hours: 5 },
-    { className: '1 M.Sc CS',       subjectCode: 'ADV-JAVA-LAB',    hours: 5 },
-    { className: '2 M.Sc CS',       subjectCode: 'BIG-DATA-LAB',    hours: 5 },
-  ];
+  await pool.query(`
+    ALTER TABLE cg_lab_requirements
+    ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
+  `);
 
-  for (const a of assignments) {
-    await pool.query(
-      `INSERT INTO cg_class_subjects (class_id, subject_id, hours_per_week, is_lab_required)
-       SELECT c.id, s.id, $1, true
-       FROM cg_classes c, cg_subjects s
-       WHERE c.name = $2 AND s.code = $3
-       ON CONFLICT (class_id, subject_id) DO NOTHING`,
-      [a.hours, a.className, a.subjectCode]
-    );
-  }
+  await pool.query(`
+    ALTER TABLE cg_labs
+    ADD COLUMN IF NOT EXISTS systems_specification TEXT;
+  `);
+
+  await pool.query(`
+    ALTER TABLE cg_labs
+    ADD COLUMN IF NOT EXISTS os_installed TEXT;
+  `);
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS udx_lab_req_class_subject
+    ON cg_lab_requirements(class_id, subject_id);
+  `);
 }
 
 async function inTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
@@ -491,8 +358,6 @@ async function startServer() {
   }
 
   await ensureSchema();
-  await seedDefaults();
-  await seedLabSubjects();
 
   const app = express();
   app.use(express.json());
@@ -888,12 +753,61 @@ async function startServer() {
 
   app.post('/api/labs', async (req, res) => {
     try {
-      const { name, dept_id, systems_count } = req.body;
+      const { name, dept_id, systems_count, systems_specification, os_installed } = req.body;
       const { rows } = await pool.query(
-        'INSERT INTO cg_labs (name, dept_id, systems_count) VALUES ($1, $2, $3) RETURNING id',
-        [name, dept_id ? Number(dept_id) : null, Number(systems_count)]
+        `INSERT INTO cg_labs (name, dept_id, systems_count, systems_specification, os_installed)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [
+          name,
+          dept_id ? Number(dept_id) : null,
+          Number(systems_count),
+          systems_specification || null,
+          os_installed || null,
+        ]
       );
       res.json({ id: rows[0].id });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/labs/:id', async (req, res) => {
+    try {
+      const labId = Number(req.params.id);
+      const { rows } = await pool.query('SELECT * FROM cg_labs WHERE id = $1', [labId]);
+      if ((rows?.length ?? 0) === 0) return res.status(404).json({ error: 'Lab not found' });
+      res.json(rows[0]);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.patch('/api/labs/:id', async (req, res) => {
+    try {
+      const labId = Number(req.params.id);
+      const existing = await pool.query('SELECT id FROM cg_labs WHERE id = $1', [labId]);
+      if ((existing.rowCount ?? 0) === 0) return res.status(404).json({ error: 'Lab not found' });
+
+      const { name, dept_id, systems_count, systems_specification, os_installed } = req.body;
+      const { rows } = await pool.query(
+        `UPDATE cg_labs
+         SET name = COALESCE($1, name),
+             dept_id = CASE WHEN $2::int = -1 THEN NULL ELSE COALESCE($2, dept_id) END,
+             systems_count = COALESCE($3, systems_count),
+             systems_specification = $4,
+             os_installed = $5
+         WHERE id = $6
+         RETURNING *`,
+        [
+          name ?? null,
+          dept_id === null ? -1 : (dept_id !== undefined ? Number(dept_id) : null),
+          systems_count !== undefined ? Number(systems_count) : null,
+          systems_specification || null,
+          os_installed || null,
+          labId,
+        ]
+      );
+      res.json(rows[0]);
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
@@ -914,6 +828,156 @@ async function startServer() {
       res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
+    }
+  });
+
+  // ── Lab Requirements ──────────────────────────────────────────────────────
+  app.get('/api/lab-requirements', async (req, res) => {
+    try {
+      const classId = req.query.class_id ? Number(req.query.class_id) : null;
+      const whereClause = classId ? 'WHERE lr.class_id = $1' : '';
+      const params = classId ? [classId] : [];
+      const { rows } = await pool.query(`
+        SELECT lr.*,
+               c.name  AS class_name,
+               s.name  AS subject_name,
+               s.code  AS subject_code,
+               l.name  AS lab_name,
+               l.systems_count AS lab_systems
+        FROM cg_lab_requirements lr
+        JOIN cg_classes  c ON lr.class_id   = c.id
+        JOIN cg_subjects s ON lr.subject_id = s.id
+        LEFT JOIN cg_labs l ON lr.lab_id    = l.id
+        ${whereClause}
+        ORDER BY lr.status ASC, c.name ASC, s.name ASC
+      `, params);
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Overview: every is_lab_required class-subject merged with its lab requirement row (if any)
+  app.get('/api/lab-requirements/overview', async (req, res) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT
+          cs.id          AS class_subject_id,
+          cs.class_id,
+          c.name         AS class_name,
+          c.year         AS year,
+          d.name         AS dept_name,
+          cs.subject_id,
+          s.name         AS subject_name,
+          s.code         AS subject_code,
+          cs.hours_per_week,
+          lr.id          AS req_id,
+          lr.duration,
+          lr.requirements,
+          lr.lab_id,
+          l.name         AS lab_name,
+          CASE
+            WHEN lr.id IS NULL THEN 'not_submitted'
+            ELSE lr.status
+          END            AS status
+        FROM cg_class_subjects cs
+        JOIN cg_classes  c  ON cs.class_id   = c.id
+        LEFT JOIN cg_departments d ON c.dept_id = d.id
+        JOIN cg_subjects s  ON cs.subject_id = s.id
+        LEFT JOIN cg_lab_requirements lr
+               ON lr.class_id = cs.class_id AND lr.subject_id = cs.subject_id
+        LEFT JOIN cg_labs l ON lr.lab_id = l.id
+        WHERE cs.is_lab_required = true
+        ORDER BY
+          CASE WHEN lr.id IS NULL THEN 0 WHEN lr.status = 'pending' THEN 1 ELSE 2 END,
+          c.name, s.name
+      `);
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/lab-requirements', async (req, res) => {
+    try {
+      const { class_id, subject_id, requirements } = req.body;
+      if (!class_id || !subject_id) {
+        return res.status(400).json({ error: 'class_id and subject_id are required.' });
+      }
+      // Derive duration from the class-subject's hours_per_week
+      const csRow = await pool.query(
+        'SELECT hours_per_week FROM cg_class_subjects WHERE class_id = $1 AND subject_id = $2',
+        [Number(class_id), Number(subject_id)]
+      );
+      const duration = csRow.rows[0]?.hours_per_week ?? 2;
+      const { rows } = await pool.query(
+        `INSERT INTO cg_lab_requirements (class_id, subject_id, duration, requirements, status)
+         VALUES ($1, $2, $3, $4, 'pending') RETURNING *`,
+        [Number(class_id), Number(subject_id), duration, requirements || null]
+      );
+      res.json(rows[0]);
+    } catch (e: any) {
+      if ((e.code as string) === '23505') {
+        return res.status(400).json({ error: 'Lab requirement already submitted for this subject.' });
+      }
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.patch('/api/lab-requirements/:id/assign', async (req, res) => {
+    try {
+      const reqId = Number(req.params.id);
+      const { lab_id } = req.body;
+      const existing = await pool.query('SELECT * FROM cg_lab_requirements WHERE id = $1', [reqId]);
+      if ((existing.rowCount ?? 0) === 0) {
+        return res.status(404).json({ error: 'Lab requirement not found.' });
+      }
+      const row = existing.rows[0] as { lab_id: number | null };
+      if (row.lab_id !== null) {
+        return res.status(400).json({ error: 'Lab already assigned. Delete the request and re-submit to change.' });
+      }
+      if (!lab_id) return res.status(400).json({ error: 'lab_id is required.' });
+      const { rows } = await pool.query(
+        `UPDATE cg_lab_requirements SET lab_id = $1, status = 'assigned' WHERE id = $2 RETURNING *`,
+        [Number(lab_id), reqId]
+      );
+      res.json(rows[0]);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.delete('/api/lab-requirements/:id', async (req, res) => {
+    try {
+      const reqId = Number(req.params.id);
+      const existing = await pool.query('SELECT id FROM cg_lab_requirements WHERE id = $1', [reqId]);
+      if ((existing.rowCount ?? 0) === 0) {
+        return res.status(404).json({ error: 'Lab requirement not found.' });
+      }
+      await pool.query('DELETE FROM cg_lab_requirements WHERE id = $1', [reqId]);
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/timetable/lab/:labId', async (req, res) => {
+    try {
+      const labId = Number(req.params.labId);
+      const { rows } = await pool.query(`
+        SELECT ts.*, c.name AS class_name, s.name AS subject_name, s.code AS subject_code,
+               st.name AS staff_name, l.name AS lab_name
+        FROM cg_timetable_slots ts
+        JOIN cg_classes c ON ts.class_id = c.id
+        LEFT JOIN cg_subjects s ON ts.subject_id = s.id
+        LEFT JOIN cg_staff st ON ts.staff_id = st.id
+        LEFT JOIN cg_labs l ON ts.lab_id = l.id
+        WHERE ts.lab_id = $1
+        ORDER BY ts.day_order, ts.period
+      `, [labId]);
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 

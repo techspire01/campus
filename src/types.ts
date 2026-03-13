@@ -74,3 +74,38 @@ export interface Settings {
   lunch_duration: string;
   lunch_after_period: string;
 }
+
+export interface LabRequirement {
+  id: number;
+  class_id: number;
+  class_name?: string;
+  subject_id: number;
+  subject_name?: string;
+  subject_code?: string;
+  duration: number;
+  requirements: string | null;
+  lab_id: number | null;
+  lab_name?: string | null;
+  lab_systems?: number | null;
+  status: 'pending' | 'assigned';
+}
+
+// Overview item: every is_lab_required class-subject, merged with its lab requirement (if any)
+export interface LabOverviewItem {
+  class_subject_id: number;
+  class_id: number;
+  class_name: string;
+  dept_name: string | null;
+  year: number | null;
+  subject_id: number;
+  subject_name: string;
+  subject_code: string;
+  hours_per_week: number;
+  // null values below mean no request has been submitted yet
+  req_id: number | null;
+  duration: number | null;
+  requirements: string | null;
+  lab_id: number | null;
+  lab_name: string | null;
+  status: 'not_submitted' | 'pending' | 'assigned';
+}

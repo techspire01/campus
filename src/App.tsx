@@ -23,7 +23,9 @@ import DepartmentDashboard from './pages/DepartmentDashboard';
 import ClassDetails from './pages/ClassDetails';
 import StaffTimetable from './pages/StaffTimetable';
 import StudentTimetable from './pages/StudentTimetable';
-import LabManagement from './pages/LabManagement';
+import LabManagement from './pages/labs/LabManagement';
+import LabRequests from './pages/labs/LabRequests';
+import LabTimetable from './pages/labs/LabTimetable';
 import PlacementManagement from './pages/PlacementManagement';
 import PlacementPreview from './pages/PlacementPreview';
 import GlobalTimetables from './pages/GlobalTimetables';
@@ -120,7 +122,8 @@ function AppContent() {
             <NavLink to="/admin" icon={LayoutDashboard} active={isActive('/admin')}>Admin Panel</NavLink>
             <NavLink to="/departments" icon={Building2} active={isActive('/departments') || isActive('/department')}>Departments</NavLink>
             <NavLink to="/common" icon={BookOpen} active={isActive('/common')}>Common Subjects</NavLink>
-            <NavLink to="/labs" icon={FlaskConical} active={isActive('/labs')}>Lab Management</NavLink>
+            <NavLink to="/labs" icon={FlaskConical} active={isActive('/labs') && !isActive('/labs/requests')}>Lab Management</NavLink>
+            <NavLink to="/labs/requests" icon={FlaskConical} active={isActive('/labs/requests')}>Lab Requests</NavLink>
             <NavLink to="/placement" icon={Briefcase} active={isActive('/placement')}>Placement Cell</NavLink>
             <NavLink to="/timetables" icon={Calendar} active={isActive('/timetables')}>Global View</NavLink>
           </nav>
@@ -171,6 +174,8 @@ function AppContent() {
             <Route path="/staff/:id" element={<StaffTimetable />} />
             <Route path="/student/:id" element={<StudentTimetable />} />
             <Route path="/labs" element={<LabManagement />} />
+            <Route path="/labs/requests" element={<LabRequests />} />
+            <Route path="/labs/:labId" element={<LabTimetable />} />
             <Route path="/placement" element={<PlacementManagement />} />
             <Route path="/placement/preview/:blockId" element={<PlacementPreview />} />
             <Route path="/timetables" element={<GlobalTimetables />} />
