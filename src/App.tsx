@@ -25,6 +25,7 @@ import StaffTimetable from './pages/StaffTimetable';
 import StudentTimetable from './pages/StudentTimetable';
 import LabManagement from './pages/LabManagement';
 import PlacementManagement from './pages/PlacementManagement';
+import PlacementPreview from './pages/PlacementPreview';
 import GlobalTimetables from './pages/GlobalTimetables';
 import CommonSubjects from './pages/CommonSubjects';
 
@@ -171,6 +172,7 @@ function AppContent() {
             <Route path="/student/:id" element={<StudentTimetable />} />
             <Route path="/labs" element={<LabManagement />} />
             <Route path="/placement" element={<PlacementManagement />} />
+            <Route path="/placement/preview/:blockId" element={<PlacementPreview />} />
             <Route path="/timetables" element={<GlobalTimetables />} />
           </Routes>
         </div>

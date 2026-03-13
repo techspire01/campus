@@ -1,14 +1,16 @@
 import { useState, useEffect } from 'react';
-import { Briefcase, Plus, Users, CheckSquare, Square, Trash2, Filter } from 'lucide-react';
+import { Briefcase, Plus, CheckSquare, Square, Trash2, Filter, Sparkles } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { Class, Department } from '../types';
 
 export default function PlacementManagement() {
+  const navigate = useNavigate();
   const [classes, setClasses] = useState<Class[]>([]);
   const [depts, setDepts] = useState<Department[]>([]);
   const [selectedClasses, setSelectedClasses] = useState<number[]>([]);
   const [hours, setHours] = useState(3);
   const [placementBlocks, setPlacementBlocks] = useState<any[]>([]);
-  
+
   const [filterYear, setFilterYear] = useState<number | 'all'>('all');
   const [filterDept, setFilterDept] = useState<number | 'all'>('all');
 
@@ -34,25 +36,61 @@ export default function PlacementManagement() {
 
   const handleAddPlacement = async () => {
     if (selectedClasses.length === 0) return;
-    
+
     const res = await fetch('/api/placement/blocks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: 'Placement Training',
-        hours: hours,
+        hours,
         class_ids: selectedClasses
       })
     });
 
     if (res.ok) {
-      fetch('/api/placement/blocks').then(res => res.json()).then(setPlacementBlocks);
+      fetch('/api/placement/blocks').then(response => response.json()).then(setPlacementBlocks);
       setSelectedClasses([]);
-      alert(`Placement block added successfully.`);
+      alert('Placement block added successfully. Click Generate Placement Timetable to open preview page.');
     } else {
-      const err = await res.json();
-      alert(err.error || 'Failed to add placement block');
+      let message = 'Failed to add placement block';
+      try {
+        const err = await res.json();
+        message = err.error || message;
+      } catch {
+        // keep default message
+      }
+      alert(message);
     }
+  };
+
+  const handleGeneratePreview = async (blockId: number) => {
+    const res = await fetch(`/api/placement/blocks/${blockId}/generate-preview`, {
+      method: 'POST'
+    });
+
+    if (!res.ok) {
+      let message = 'Failed to generate placement timetable preview';
+      try {
+        const err = await res.json();
+        message = err.error || `${message} (HTTP ${res.status})`;
+      } catch {
+        try {
+          const text = await res.text();
+          message = text ? `${message}: ${text}` : `${message} (HTTP ${res.status})`;
+        } catch {
+          message = `${message} (HTTP ${res.status})`;
+        }
+      }
+      alert(message);
+      return;
+    }
+
+    fetch('/api/placement/blocks').then(response => response.json()).then(setPlacementBlocks);
+    navigate(`/placement/preview/${blockId}`);
+  };
+
+  const handleOpenPreview = (blockId: number) => {
+    navigate(`/placement/preview/${blockId}`);
   };
 
   const handleDeleteBlock = async (id: number) => {
@@ -60,7 +98,16 @@ export default function PlacementManagement() {
       method: 'DELETE'
     });
     if (res.ok) {
-      setPlacementBlocks(placementBlocks.filter(b => b.id !== id));
+      fetch('/api/placement/blocks').then(response => response.json()).then(setPlacementBlocks);
+    } else {
+      let message = 'Failed to delete placement block';
+      try {
+        const err = await res.json();
+        message = err.error || message;
+      } catch {
+        // keep default message
+      }
+      alert(message);
     }
   };
 
@@ -69,7 +116,16 @@ export default function PlacementManagement() {
       method: 'DELETE'
     });
     if (res.ok) {
-      fetch('/api/placement/blocks').then(res => res.json()).then(setPlacementBlocks);
+      fetch('/api/placement/blocks').then(response => response.json()).then(setPlacementBlocks);
+    } else {
+      let message = 'Failed to remove class from placement block';
+      try {
+        const err = await res.json();
+        message = err.error || message;
+      } catch {
+        // keep default message
+      }
+      alert(message);
     }
   };
 
@@ -78,12 +134,11 @@ export default function PlacementManagement() {
       <header className="flex justify-between items-end border-b border-[#1e2d47] pb-6">
         <div>
           <h1 className="text-4xl font-mono font-bold text-white tracking-tighter uppercase">Placement Cell Schedule</h1>
-          <p className="text-slate-500 mt-2">Assign placement training blocks and regenerate schedules.</p>
+          <p className="text-slate-500 mt-2">Assign placement training blocks and generate preview in a dedicated page.</p>
         </div>
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        {/* Selection Panel */}
         <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl overflow-hidden">
           <div className="bg-[#141c2e] px-6 py-4 border-b border-[#1e2d47] flex items-center gap-3">
             <Briefcase className="text-cyan-400" size={20} />
@@ -93,7 +148,7 @@ export default function PlacementManagement() {
             <div className="flex flex-col gap-4">
               <div className="flex justify-between items-center">
                 <span className="text-sm font-medium text-slate-300">Select Classes</span>
-                <button 
+                <button
                   onClick={() => {
                     const filteredIds = filteredClasses.map(c => c.id);
                     const allFilteredSelected = filteredIds.every(id => selectedClasses.includes(id));
@@ -105,17 +160,18 @@ export default function PlacementManagement() {
                   }}
                   className="text-[10px] font-mono text-cyan-500 uppercase hover:text-cyan-400"
                 >
-                  {filteredClasses.length > 0 && filteredClasses.every(c => selectedClasses.includes(c.id)) ? 'Deselect Filtered' : 'Select Filtered'}
+                  {filteredClasses.length > 0 && filteredClasses.every(c => selectedClasses.includes(c.id))
+                    ? 'Deselect Filtered'
+                    : 'Select Filtered'}
                 </button>
               </div>
 
-              {/* Filters */}
               <div className="grid grid-cols-2 gap-2 p-3 bg-[#0a0e17] border border-[#1e2d47] rounded-lg">
                 <div className="space-y-1">
                   <label className="text-[9px] font-mono text-slate-500 uppercase tracking-widest flex items-center gap-1">
                     <Filter size={10} /> Year
                   </label>
-                  <select 
+                  <select
                     className="w-full bg-[#141c2e] border border-[#1e2d47] rounded p-1 text-xs outline-none"
                     value={filterYear}
                     onChange={e => setFilterYear(e.target.value === 'all' ? 'all' : parseInt(e.target.value))}
@@ -130,22 +186,26 @@ export default function PlacementManagement() {
                   <label className="text-[9px] font-mono text-slate-500 uppercase tracking-widest flex items-center gap-1">
                     <Filter size={10} /> Dept
                   </label>
-                  <select 
+                  <select
                     className="w-full bg-[#141c2e] border border-[#1e2d47] rounded p-1 text-xs outline-none"
                     value={filterDept}
                     onChange={e => setFilterDept(e.target.value === 'all' ? 'all' : parseInt(e.target.value))}
                   >
                     <option value="all">All Depts</option>
-                    {depts.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                    {depts.map(d => (
+                      <option key={d.id} value={d.id}>
+                        {d.name}
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>
             </div>
-            
+
             <div className="bg-[#0a0e17] border border-[#1e2d47] rounded-lg max-h-60 overflow-y-auto p-2 space-y-1 custom-scrollbar">
               {filteredClasses.map(c => (
-                <div 
-                  key={c.id} 
+                <div
+                  key={c.id}
                   onClick={() => toggleClass(c.id)}
                   className="flex items-center gap-3 p-2 hover:bg-[#141c2e] rounded cursor-pointer transition-colors group"
                 >
@@ -161,15 +221,13 @@ export default function PlacementManagement() {
                 </div>
               ))}
               {filteredClasses.length === 0 && (
-                <div className="p-4 text-center text-xs text-slate-600 font-mono italic">
-                  No classes match the filters
-                </div>
+                <div className="p-4 text-center text-xs text-slate-600 font-mono italic">No classes match the filters</div>
               )}
             </div>
 
             <div className="space-y-1">
               <label className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Hours/Week</label>
-              <input 
+              <input
                 type="number"
                 className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-3 text-sm outline-none focus:border-cyan-500"
                 value={hours || ''}
@@ -177,7 +235,7 @@ export default function PlacementManagement() {
               />
             </div>
 
-            <button 
+            <button
               onClick={handleAddPlacement}
               className="w-full bg-cyan-700 hover:bg-cyan-600 text-white font-mono font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-all"
             >
@@ -186,7 +244,6 @@ export default function PlacementManagement() {
           </div>
         </section>
 
-        {/* Assigned Blocks */}
         <section className="space-y-4">
           <div className="flex justify-between items-center">
             <h3 className="text-sm font-mono font-bold text-slate-500 uppercase tracking-widest">Assigned Blocks</h3>
@@ -197,9 +254,12 @@ export default function PlacementManagement() {
               <div key={block.id} className="bg-[#0f1623] border border-[#1e2d47] p-6 rounded-xl space-y-4">
                 <div className="flex flex-wrap gap-2">
                   {block.classes?.map((c: Class) => (
-                    <div key={c.id} className="group relative px-2 py-1 bg-cyan-500/10 border border-cyan-500/20 rounded text-[10px] font-mono text-cyan-400 flex items-center gap-2">
+                    <div
+                      key={c.id}
+                      className="group relative px-2 py-1 bg-cyan-500/10 border border-cyan-500/20 rounded text-[10px] font-mono text-cyan-400 flex items-center gap-2"
+                    >
                       {c.name}
-                      <button 
+                      <button
                         onClick={() => handleRemoveClassFromBlock(block.id, c.id)}
                         className="text-red-400 hover:text-red-300 opacity-0 group-hover:opacity-100 transition-opacity"
                         title="Remove class from block"
@@ -214,13 +274,29 @@ export default function PlacementManagement() {
                     <div className="font-bold text-white">{block.name}</div>
                     <div className="text-[10px] text-slate-500 font-mono">{block.hours} continuous hours/week</div>
                   </div>
-                  <button 
-                    onClick={() => handleDeleteBlock(block.id)}
-                    className="text-slate-600 hover:text-red-400 transition-colors p-2 hover:bg-red-400/10 rounded-lg"
-                    title="Delete block and clear slots"
-                  >
-                    <Trash2 size={18} />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handleGeneratePreview(block.id)}
+                      className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-mono uppercase rounded-lg flex items-center gap-1"
+                    >
+                      <Sparkles size={13} /> Generate Placement Timetable
+                    </button>
+                    {block.has_preview && (
+                      <button
+                        onClick={() => handleOpenPreview(block.id)}
+                        className="px-3 py-2 bg-cyan-700 hover:bg-cyan-600 text-white text-[10px] font-mono uppercase rounded-lg"
+                      >
+                        Open Preview
+                      </button>
+                    )}
+                    <button
+                      onClick={() => handleDeleteBlock(block.id)}
+                      className="text-slate-600 hover:text-red-400 transition-colors p-2 hover:bg-red-400/10 rounded-lg"
+                      title="Delete block and clear slots"
+                    >
+                      <Trash2 size={18} />
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}

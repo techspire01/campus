@@ -2,6 +2,8 @@ import 'dotenv/config';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
+import fs from 'fs';
+import { spawn } from 'child_process';
 import { Pool, PoolClient } from 'pg';
 
 const pool = new Pool({
@@ -114,6 +116,21 @@ async function ensureSchema() {
       class_id INTEGER NOT NULL REFERENCES cg_classes(id) ON DELETE CASCADE,
       PRIMARY KEY (placement_id, class_id)
     );
+
+    CREATE TABLE IF NOT EXISTS cg_placement_preview_slots (
+      id SERIAL PRIMARY KEY,
+      placement_block_id INTEGER NOT NULL REFERENCES cg_placement_blocks(id) ON DELETE CASCADE,
+      class_id INTEGER NOT NULL REFERENCES cg_classes(id) ON DELETE CASCADE,
+      day_order INTEGER NOT NULL,
+      period INTEGER NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (placement_block_id, class_id, day_order, period)
+    );
+  `);
+
+  await pool.query(`
+    ALTER TABLE cg_timetable_slots
+    ADD COLUMN IF NOT EXISTS placement_block_id INTEGER REFERENCES cg_placement_blocks(id) ON DELETE CASCADE;
   `);
 }
 
@@ -184,6 +201,69 @@ async function inTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise
   }
 }
 
+type SchedulerRequest = {
+  classes: number[];
+  hours: number;
+  periods_per_day: number;
+  days: number[];
+  occupied: Record<string, Array<{ day_order: number; period: number }>>;
+};
+
+type SchedulerAssignment = {
+  class_id: number;
+  day_order: number;
+  start_period: number;
+  periods: number[];
+  segment: 'morning' | 'afternoon';
+};
+
+type SchedulerResponse =
+  | { ok: true; assignments: SchedulerAssignment[] }
+  | { ok: false; error: string };
+
+function runPlacementScheduler(payload: SchedulerRequest): Promise<SchedulerResponse> {
+  return new Promise((resolve, reject) => {
+    const configuredPython = process.env.PYTHON_PATH;
+    const workspaceVenvWindows = path.join(process.cwd(), '.venv', 'Scripts', 'python.exe');
+    const workspaceVenvUnix = path.join(process.cwd(), '.venv', 'bin', 'python');
+    const pythonBinary = configuredPython
+      || (fs.existsSync(workspaceVenvWindows) ? workspaceVenvWindows : '')
+      || (fs.existsSync(workspaceVenvUnix) ? workspaceVenvUnix : '')
+      || 'python';
+    const scriptPath = path.join(process.cwd(), 'scheduler', 'placement_scheduler.py');
+    const python = spawn(pythonBinary, [scriptPath]);
+
+    let stdout = '';
+    let stderr = '';
+
+    python.stdout.on('data', (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+
+    python.stderr.on('data', (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+
+    python.on('error', reject);
+
+    python.on('close', code => {
+      if (code !== 0) {
+        reject(new Error(`Placement scheduler failed with code ${code}: ${stderr || stdout}`));
+        return;
+      }
+
+      try {
+        resolve(JSON.parse(stdout) as SchedulerResponse);
+      } catch {
+        reject(new Error(`Invalid scheduler output: ${stdout || stderr}`));
+      }
+    });
+
+    python.stdin.write(JSON.stringify(payload));
+    python.stdin.end();
+  });
+}
+
 async function startServer() {
   if (!process.env.SUPABASE_DB_URL && !process.env.DATABASE_URL) {
     throw new Error('Missing SUPABASE_DB_URL or DATABASE_URL in .env');
@@ -194,6 +274,12 @@ async function startServer() {
 
   const app = express();
   app.use(express.json());
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (err instanceof SyntaxError && 'body' in err) {
+      return res.status(400).json({ error: 'Invalid JSON payload' });
+    }
+    return next(err);
+  });
   const PORT = 3000;
 
   app.get('/api/settings', async (req, res) => {
@@ -688,7 +774,15 @@ async function startServer() {
            WHERE pc.placement_id = $1`,
           [block.id]
         );
-        result.push({ ...block, classes: classes.rows });
+        const preview = await pool.query(
+          'SELECT COUNT(*)::int AS count FROM cg_placement_preview_slots WHERE placement_block_id = $1',
+          [block.id]
+        );
+        result.push({
+          ...block,
+          classes: classes.rows,
+          has_preview: Number(preview.rows[0].count) > 0
+        });
       }
       res.json(result);
     } catch (e: any) {
@@ -700,18 +794,57 @@ async function startServer() {
     try {
       const { name, hours, class_ids } = req.body as { name: string; hours: number; class_ids: number[] };
 
+      if (!Array.isArray(class_ids) || class_ids.length === 0) {
+        return res.status(400).json({ error: 'Select at least one class for placement.' });
+      }
+
+      const normalizedHours = Number(hours);
+      if (!Number.isInteger(normalizedHours) || normalizedHours < 2) {
+        return res.status(400).json({ error: 'Placement block must be at least 2 consecutive hours.' });
+      }
+
       const blockId = await inTransaction(async client => {
+        const dedupedClassIds = [...new Set(class_ids.map(id => Number(id)).filter(Boolean))];
         const block = await client.query(
           'INSERT INTO cg_placement_blocks (name, hours) VALUES ($1, $2) RETURNING id',
-          [name, Number(hours)]
+          [name, normalizedHours]
         );
         const placementId = block.rows[0].id as number;
 
-        for (const classId of class_ids) {
+        for (const classId of dedupedClassIds) {
           await client.query(
-            'INSERT INTO cg_placement_classes (placement_id, class_id) VALUES ($1, $2)',
+            'INSERT INTO cg_placement_classes (placement_id, class_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
             [placementId, Number(classId)]
           );
+        }
+
+        return placementId;
+      });
+
+      res.json({ id: blockId });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/placement/blocks/:id/generate-preview', async (req, res) => {
+    try {
+      const blockId = Number(req.params.id);
+
+      const generated = await inTransaction(async client => {
+        const blockRows = await client.query('SELECT id, hours FROM cg_placement_blocks WHERE id = $1', [blockId]);
+        if (blockRows.rowCount === 0) {
+          throw new Error('Placement block not found');
+        }
+
+        const block = blockRows.rows[0] as { id: number; hours: number };
+        const classRows = await client.query(
+          'SELECT class_id FROM cg_placement_classes WHERE placement_id = $1 ORDER BY class_id',
+          [blockId]
+        );
+        const classIds = classRows.rows.map((r: { class_id: number }) => r.class_id);
+        if (classIds.length === 0) {
+          throw new Error('No classes assigned to this placement block');
         }
 
         const settingsRows = await client.query('SELECT key, value FROM cg_settings');
@@ -721,45 +854,298 @@ async function startServer() {
         }, {});
         const periodsPerDay = Number(settings.periods_per_day || 6);
 
-        let assigned = false;
-        for (let day = 1; day <= 6 && !assigned; day++) {
-          for (let startP = 1; startP <= periodsPerDay - Number(hours) + 1 && !assigned; startP++) {
-            let allFree = true;
-            for (const classId of class_ids) {
-              const occupied = await client.query(
-                `SELECT 1 FROM cg_timetable_slots
-                 WHERE class_id = $1 AND day_order = $2 AND period >= $3 AND period < $4
-                 LIMIT 1`,
-                [Number(classId), day, startP, startP + Number(hours)]
-              );
-              if (occupied.rowCount) {
-                allFree = false;
-                break;
-              }
-            }
+        const occupiedRows = await client.query(
+          `SELECT class_id, day_order, period, type, placement_block_id
+           FROM cg_timetable_slots
+           WHERE class_id = ANY($1::int[])
+             AND NOT (type = 'placement' AND placement_block_id = $2)`,
+          [classIds, blockId]
+        );
 
-            if (allFree) {
-              for (const classId of class_ids) {
-                for (let p = startP; p < startP + Number(hours); p++) {
-                  await client.query(
-                    `INSERT INTO cg_timetable_slots (class_id, day_order, period, type, is_locked)
-                     VALUES ($1, $2, $3, 'placement', TRUE)
-                     ON CONFLICT (class_id, day_order, period) DO UPDATE
-                     SET type = EXCLUDED.type, is_locked = EXCLUDED.is_locked`,
-                    [Number(classId), day, p]
-                  );
-                }
-              }
-              assigned = true;
-            }
+        const occupied: Record<string, Array<{ day_order: number; period: number }>> = {};
+        const blockedBySubjects: Record<string, Array<{ day_order: number; period: number }>> = {};
+        for (const classId of classIds) {
+          occupied[String(classId)] = [];
+          blockedBySubjects[String(classId)] = [];
+        }
+
+        for (const row of occupiedRows.rows as Array<{ class_id: number; day_order: number; period: number; type: string | null }>) {
+          occupied[String(row.class_id)].push({ day_order: row.day_order, period: row.period });
+          if (row.type !== 'placement') {
+            blockedBySubjects[String(row.class_id)].push({ day_order: row.day_order, period: row.period });
           }
         }
 
-        if (!assigned) throw new Error('Could not find a suitable time slot for this placement block across all selected classes.');
-        return placementId;
+        const schedule = await runPlacementScheduler({
+          classes: classIds,
+          hours: Number(block.hours),
+          periods_per_day: periodsPerDay,
+          days: [1, 2, 3, 4, 5, 6],
+          occupied
+        });
+
+        if (!schedule.ok) {
+          const errorMessage = 'error' in schedule ? schedule.error : 'Placement scheduler failed';
+          throw new Error(errorMessage);
+        }
+
+        await client.query('DELETE FROM cg_placement_preview_slots WHERE placement_block_id = $1', [blockId]);
+
+        for (const assignment of schedule.assignments) {
+          for (const period of assignment.periods) {
+            await client.query(
+              `INSERT INTO cg_placement_preview_slots (placement_block_id, class_id, day_order, period)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (placement_block_id, class_id, day_order, period) DO NOTHING`,
+              [blockId, assignment.class_id, assignment.day_order, period]
+            );
+          }
+        }
+
+        return {
+          assignments: schedule.assignments,
+          blocked_by_subjects: blockedBySubjects,
+          periods_per_day: periodsPerDay,
+          hours: Number(block.hours)
+        };
       });
 
-      res.json({ id: blockId });
+      res.json(generated);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/placement/blocks/:id/preview', async (req, res) => {
+    try {
+      const blockId = Number(req.params.id);
+
+      const result = await inTransaction(async client => {
+        const blockRows = await client.query('SELECT id, hours FROM cg_placement_blocks WHERE id = $1', [blockId]);
+        if (blockRows.rowCount === 0) {
+          throw new Error('Placement block not found');
+        }
+
+        const classRows = await client.query(
+          'SELECT class_id FROM cg_placement_classes WHERE placement_id = $1 ORDER BY class_id',
+          [blockId]
+        );
+        const classIds = classRows.rows.map((r: { class_id: number }) => r.class_id);
+        if (classIds.length === 0) {
+          throw new Error('No classes assigned to this placement block');
+        }
+
+        const settingsRows = await client.query('SELECT key, value FROM cg_settings');
+        const settings = settingsRows.rows.reduce((acc: Record<string, string>, row: { key: string; value: string }) => {
+          acc[row.key] = row.value;
+          return acc;
+        }, {});
+        const periodsPerDay = Number(settings.periods_per_day || 6);
+
+        const blockedRows = await client.query(
+          `SELECT class_id, day_order, period, type
+           FROM cg_timetable_slots
+           WHERE class_id = ANY($1::int[])
+             AND NOT (type = 'placement' AND placement_block_id = $2)`,
+          [classIds, blockId]
+        );
+
+        const blockedBySubjects: Record<string, Array<{ day_order: number; period: number }>> = {};
+        for (const classId of classIds) {
+          blockedBySubjects[String(classId)] = [];
+        }
+
+        for (const row of blockedRows.rows as Array<{ class_id: number; day_order: number; period: number; type: string | null }>) {
+          if (row.type !== 'placement') {
+            blockedBySubjects[String(row.class_id)].push({ day_order: row.day_order, period: row.period });
+          }
+        }
+
+        const previewRows = await client.query(
+          `SELECT class_id, day_order, period
+           FROM cg_placement_preview_slots
+           WHERE placement_block_id = $1
+           ORDER BY class_id, day_order, period`,
+          [blockId]
+        );
+
+        const grouped = new Map<string, number[]>();
+        for (const row of previewRows.rows as Array<{ class_id: number; day_order: number; period: number }>) {
+          const key = `${row.class_id}-${row.day_order}`;
+          const values = grouped.get(key) || [];
+          values.push(Number(row.period));
+          grouped.set(key, values);
+        }
+
+        const assignments: Array<{
+          class_id: number;
+          day_order: number;
+          start_period: number;
+          periods: number[];
+          segment: 'morning' | 'afternoon';
+        }> = [];
+
+        const split = Math.floor(periodsPerDay / 2);
+        for (const [key, periods] of grouped.entries()) {
+          const [classIdRaw, dayRaw] = key.split('-');
+          const classId = Number(classIdRaw);
+          const dayOrder = Number(dayRaw);
+          periods.sort((a, b) => a - b);
+          if (periods.length === 0) continue;
+          const segment: 'morning' | 'afternoon' = periods[0] <= split ? 'morning' : 'afternoon';
+
+          assignments.push({
+            class_id: classId,
+            day_order: dayOrder,
+            start_period: periods[0],
+            periods,
+            segment
+          });
+        }
+
+        return {
+          assignments,
+          blocked_by_subjects: blockedBySubjects,
+          periods_per_day: periodsPerDay,
+          hours: Number(blockRows.rows[0].hours)
+        };
+      });
+
+      res.json(result);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/placement/blocks/:id/fix-slots', async (req, res) => {
+    try {
+      const blockId = Number(req.params.id);
+      const { assignments } = req.body as {
+        assignments: Array<{ class_id: number; day_order: number; periods: number[] }>;
+      };
+
+      if (!Array.isArray(assignments) || assignments.length === 0) {
+        return res.status(400).json({ error: 'No generated assignments provided to fix.' });
+      }
+
+      await inTransaction(async client => {
+        const blockRows = await client.query('SELECT id FROM cg_placement_blocks WHERE id = $1', [blockId]);
+        if (blockRows.rowCount === 0) {
+          throw new Error('Placement block not found');
+        }
+
+        const hoursRows = await client.query('SELECT hours FROM cg_placement_blocks WHERE id = $1', [blockId]);
+        const blockHours = Number(hoursRows.rows[0].hours || 0);
+
+        const classRows = await client.query('SELECT class_id FROM cg_placement_classes WHERE placement_id = $1', [blockId]);
+        const allowedClassIds = new Set(classRows.rows.map((r: { class_id: number }) => r.class_id));
+
+        await client.query('DELETE FROM cg_placement_preview_slots WHERE placement_block_id = $1', [blockId]);
+
+        for (const a of assignments) {
+          if (!allowedClassIds.has(Number(a.class_id))) {
+            throw new Error(`Class ${a.class_id} is not part of this placement block`);
+          }
+
+          const periods = (a.periods || []).map(Number).sort((x, y) => x - y);
+          if (periods.length < 2) {
+            throw new Error(`Class ${a.class_id} must have at least 2 consecutive placement periods`);
+          }
+          for (let i = 1; i < periods.length; i++) {
+            if (periods[i] !== periods[i - 1] + 1) {
+              throw new Error(`Class ${a.class_id} placement periods must be consecutive`);
+            }
+          }
+
+          for (const p of periods) {
+            const clash = await client.query(
+              `SELECT id
+               FROM cg_timetable_slots
+               WHERE class_id = $1
+                 AND day_order = $2
+                 AND period = $3
+                 AND NOT (type = 'placement' AND placement_block_id = $4)
+               LIMIT 1`,
+              [Number(a.class_id), Number(a.day_order), Number(p), blockId]
+            );
+
+            if (clash.rowCount > 0) {
+              throw new Error(
+                `Conflict detected for class ${a.class_id} at Day ${a.day_order}, Period ${p}.`
+              );
+            }
+
+            await client.query(
+              `INSERT INTO cg_placement_preview_slots (placement_block_id, class_id, day_order, period)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (placement_block_id, class_id, day_order, period) DO NOTHING`,
+              [blockId, Number(a.class_id), Number(a.day_order), Number(p)]
+            );
+          }
+        }
+
+        const previewRows = await client.query(
+          `SELECT class_id, day_order, period
+           FROM cg_placement_preview_slots
+           WHERE placement_block_id = $1
+           ORDER BY class_id, day_order, period`,
+          [blockId]
+        );
+
+        if (previewRows.rowCount === 0) {
+          throw new Error('No preview slots found to fix. Generate preview first.');
+        }
+
+        const grouped = new Map<string, number[]>();
+        for (const row of previewRows.rows as Array<{ class_id: number; day_order: number; period: number }>) {
+          const key = `${row.class_id}-${row.day_order}`;
+          const periods = grouped.get(key) || [];
+          periods.push(Number(row.period));
+          grouped.set(key, periods);
+        }
+
+        const classToDays = new Map<number, number>();
+        for (const [key, periods] of grouped.entries()) {
+          periods.sort((x, y) => x - y);
+          if (periods.length !== blockHours) {
+            throw new Error(`Preview hours mismatch for ${key}. Expected ${blockHours} periods.`);
+          }
+          for (let i = 1; i < periods.length; i++) {
+            if (periods[i] !== periods[i - 1] + 1) {
+              throw new Error(`Preview periods must be consecutive for ${key}.`);
+            }
+          }
+          const classId = Number(key.split('-')[0]);
+          classToDays.set(classId, (classToDays.get(classId) || 0) + 1);
+        }
+
+        for (const classId of allowedClassIds.values()) {
+          if ((classToDays.get(classId) || 0) !== 1) {
+            throw new Error(`Class ${classId} must have exactly one preview block before fixing.`);
+          }
+        }
+
+        await client.query('DELETE FROM cg_timetable_slots WHERE placement_block_id = $1', [blockId]);
+
+        for (const row of previewRows.rows as Array<{ class_id: number; day_order: number; period: number }>) {
+          await client.query(
+            `INSERT INTO cg_timetable_slots (class_id, day_order, period, type, is_locked, placement_block_id, subject_id, staff_id, lab_id)
+             VALUES ($1, $2, $3, 'placement', TRUE, $4, NULL, NULL, NULL)
+             ON CONFLICT (class_id, day_order, period) DO UPDATE
+             SET type = EXCLUDED.type,
+                 is_locked = EXCLUDED.is_locked,
+                 placement_block_id = EXCLUDED.placement_block_id,
+                 subject_id = NULL,
+                 staff_id = NULL,
+                 lab_id = NULL`,
+            [Number(row.class_id), Number(row.day_order), Number(row.period), blockId]
+          );
+        }
+
+        await client.query('DELETE FROM cg_placement_preview_slots WHERE placement_block_id = $1', [blockId]);
+      });
+
+      res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
@@ -770,9 +1156,16 @@ async function startServer() {
       const blockId = Number(req.params.id);
       await inTransaction(async client => {
         const classes = await client.query('SELECT class_id FROM cg_placement_classes WHERE placement_id = $1', [blockId]);
-        for (const c of classes.rows) {
-          await client.query("DELETE FROM cg_timetable_slots WHERE class_id = $1 AND type = 'placement'", [c.class_id]);
+
+        const taggedDelete = await client.query('DELETE FROM cg_timetable_slots WHERE placement_block_id = $1', [blockId]);
+        await client.query('DELETE FROM cg_placement_preview_slots WHERE placement_block_id = $1', [blockId]);
+
+        if (taggedDelete.rowCount === 0) {
+          for (const c of classes.rows as Array<{ class_id: number }>) {
+            await client.query("DELETE FROM cg_timetable_slots WHERE class_id = $1 AND type = 'placement'", [c.class_id]);
+          }
         }
+
         await client.query('DELETE FROM cg_placement_classes WHERE placement_id = $1', [blockId]);
         await client.query('DELETE FROM cg_placement_blocks WHERE id = $1', [blockId]);
       });
@@ -788,7 +1181,20 @@ async function startServer() {
       const classId = Number(req.params.classId);
 
       await inTransaction(async client => {
-        await client.query("DELETE FROM cg_timetable_slots WHERE class_id = $1 AND type = 'placement'", [classId]);
+        const taggedDelete = await client.query(
+          'DELETE FROM cg_timetable_slots WHERE class_id = $1 AND placement_block_id = $2',
+          [classId, blockId]
+        );
+
+        if (taggedDelete.rowCount === 0) {
+          await client.query("DELETE FROM cg_timetable_slots WHERE class_id = $1 AND type = 'placement'", [classId]);
+        }
+
+        await client.query(
+          'DELETE FROM cg_placement_preview_slots WHERE placement_block_id = $1 AND class_id = $2',
+          [blockId, classId]
+        );
+
         await client.query('DELETE FROM cg_placement_classes WHERE placement_id = $1 AND class_id = $2', [blockId, classId]);
 
         const remain = await client.query('SELECT COUNT(*)::int AS count FROM cg_placement_classes WHERE placement_id = $1', [blockId]);
