@@ -42,6 +42,22 @@ export default function AdminDashboard() {
     setNewDept({ name: '', type: 'core' });
   };
 
+  const handleDeleteDept = async (deptId: number) => {
+    const shouldDelete = window.confirm('Delete this department? This will delete its classes and unlink staff from the department.');
+    if (!shouldDelete) return;
+
+    const res = await fetch(`/api/departments/${deptId}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (!res.ok) {
+      setStatus({ type: 'error', msg: data.error || 'Failed to delete department' });
+      return;
+    }
+
+    setStatus({ type: 'success', msg: 'Department deleted. Staff unlinked and classes removed.' });
+    fetch('/api/departments').then(r => r.json()).then(setDepts);
+    fetch('/api/staff').then(r => r.json()).then(setStaff);
+  };
+
   const handleAddStaff = async () => {
     const res = await fetch('/api/staff', {
       method: 'POST',
@@ -70,6 +86,27 @@ export default function AdminDashboard() {
     setSubjects([...subjects, data as Subject]);
     setNewSubject({ name: '', code: '', type: 'core', dept_id: '', is_addon: false });
     setStatus({ type: 'success', msg: 'Subject saved to database' });
+  };
+
+  const handleDeleteSubject = async (subjectId: number) => {
+    const shouldDelete = window.confirm('Delete this subject? It will be unassigned from all classes automatically.');
+    if (!shouldDelete) return;
+
+    try {
+      const res = await fetch(`/api/subjects/${subjectId}`, { method: 'DELETE' });
+      const raw = await res.text();
+      const data = raw ? JSON.parse(raw) : {};
+
+      if (!res.ok) {
+        setStatus({ type: 'error', msg: data.error || 'Failed to delete subject. Restart dev server and try again.' });
+        return;
+      }
+
+      setSubjects(current => current.filter(item => item.id !== subjectId));
+      setStatus({ type: 'success', msg: 'Subject deleted and removed from all class assignments.' });
+    } catch {
+      setStatus({ type: 'error', msg: 'Delete request failed. Restart dev server and try again.' });
+    }
   };
 
   const handleGenerateTimetable = async () => {
@@ -173,8 +210,17 @@ export default function AdminDashboard() {
             <div className="space-y-2 max-h-60 overflow-y-auto pr-2 custom-scrollbar">
               {depts.map(d => (
                 <div key={d.id} className="flex justify-between items-center p-3 bg-[#141c2e] border border-[#1e2d47] rounded">
-                  <span className="font-medium">{d.name}</span>
-                  <span className="text-[10px] font-mono text-slate-500 uppercase">{d.type}</span>
+                  <div>
+                    <span className="font-medium">{d.name}</span>
+                    <div className="text-[10px] font-mono text-slate-500 uppercase">{d.type}</div>
+                  </div>
+                  <button
+                    onClick={() => handleDeleteDept(d.id)}
+                    className="text-slate-500 hover:text-red-400 transition-colors"
+                    title="Delete department"
+                  >
+                    <Trash2 size={16} />
+                  </button>
                 </div>
               ))}
             </div>
@@ -286,6 +332,13 @@ export default function AdminDashboard() {
                     <div className="font-medium">{s.name}</div>
                     <div className="text-[10px] text-slate-500 font-mono">{s.code} • {s.type}</div>
                   </div>
+                  <button
+                    onClick={() => handleDeleteSubject(s.id)}
+                    className="text-slate-500 hover:text-red-400 transition-colors"
+                    title="Delete subject"
+                  >
+                    <Trash2 size={16} />
+                  </button>
                 </div>
               ))}
             </div>

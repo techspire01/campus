@@ -213,6 +213,39 @@ async function startServer() {
     res.json({ id: info.lastInsertRowid });
   });
 
+  app.delete("/api/departments/:id", (req, res) => {
+    try {
+      const deptId = Number(req.params.id);
+      const existing = db.prepare("SELECT * FROM departments WHERE id = ?").get(deptId);
+      if (!existing) {
+        return res.status(404).json({ error: "Department not found" });
+      }
+
+      const transaction = db.transaction(() => {
+        const deptClasses = db.prepare("SELECT id FROM classes WHERE dept_id = ?").all(deptId) as { id: number }[];
+        const classIds = deptClasses.map(c => c.id);
+
+        if (classIds.length > 0) {
+          const placeholders = classIds.map(() => "?").join(",");
+          db.prepare(`DELETE FROM timetable_slots WHERE class_id IN (${placeholders})`).run(...classIds);
+          db.prepare(`DELETE FROM class_subjects WHERE class_id IN (${placeholders})`).run(...classIds);
+          db.prepare(`DELETE FROM lab_requirements WHERE class_id IN (${placeholders})`).run(...classIds);
+          db.prepare(`DELETE FROM placement_classes WHERE class_id IN (${placeholders})`).run(...classIds);
+          db.prepare(`DELETE FROM classes WHERE id IN (${placeholders})`).run(...classIds);
+        }
+
+        db.prepare("UPDATE staff SET dept_id = NULL WHERE dept_id = ?").run(deptId);
+        db.prepare("UPDATE subjects SET dept_id = NULL WHERE dept_id = ?").run(deptId);
+        db.prepare("DELETE FROM departments WHERE id = ?").run(deptId);
+      });
+
+      transaction();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
   app.get("/api/staff", (req, res) => {
     const staff = db.prepare(`
       SELECT s.*, d.name as dept_name,
@@ -243,6 +276,28 @@ async function startServer() {
       const info = stmt.run(name?.trim(), code?.trim(), type, normalizedDeptId, is_addon ? 1 : 0);
       const subject = db.prepare("SELECT * FROM subjects WHERE id = ?").get(info.lastInsertRowid);
       res.json(subject);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.delete("/api/subjects/:id", (req, res) => {
+    try {
+      const subjectId = Number(req.params.id);
+      const existing = db.prepare("SELECT * FROM subjects WHERE id = ?").get(subjectId);
+      if (!existing) {
+        return res.status(404).json({ error: "Subject not found" });
+      }
+
+      const transaction = db.transaction(() => {
+        db.prepare("DELETE FROM timetable_slots WHERE subject_id = ?").run(subjectId);
+        db.prepare("DELETE FROM class_subjects WHERE subject_id = ?").run(subjectId);
+        db.prepare("DELETE FROM lab_requirements WHERE subject_id = ?").run(subjectId);
+        db.prepare("DELETE FROM subjects WHERE id = ?").run(subjectId);
+      });
+
+      transaction();
+      res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }

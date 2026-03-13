@@ -138,13 +138,8 @@ export default function CommonSubjects() {
     await assignSubjectToSelectedClasses(subjectId, assignedStaffId);
   };
 
-  const handleCreateSubjectAndAssign = async () => {
+  const handleCreateSubjectOnly = async () => {
     setStatus(null);
-
-    if (selectedClassIds.length === 0) {
-      setStatus({ type: 'error', msg: 'Select class(es) before creating and assigning.' });
-      return;
-    }
 
     const createRes = await fetch('/api/subjects', {
       method: 'POST',
@@ -165,12 +160,9 @@ export default function CommonSubjects() {
       return;
     }
 
-    const assignedStaffId = resolveStaffId(staffInput);
-    await assignSubjectToSelectedClasses(createData.id, assignedStaffId);
-
     setShowCreateModal(false);
     setNewSubject({ name: '', code: '', type: 'common', is_addon: false });
-    setSubjectInput(`${createData.code} - ${createData.name}`);
+    setStatus({ type: 'success', msg: 'Subject created successfully. Now enter/select it in the subject box and assign manually.' });
     refreshData();
   };
 
@@ -388,10 +380,10 @@ export default function CommonSubjects() {
                 Cancel
               </button>
               <button
-                onClick={handleCreateSubjectAndAssign}
+                onClick={handleCreateSubjectOnly}
                 className="px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-700 text-sm text-white"
               >
-                Create & Assign to Selected
+                Create Subject
               </button>
             </div>
           </div>
