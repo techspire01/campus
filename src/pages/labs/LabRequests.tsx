@@ -1,12 +1,43 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
   FlaskConical, ArrowLeft, CheckCircle2, Clock, Trash2,
-  FlaskRound, Lock, Bell, AlertCircle
+  FlaskRound, Lock, Bell, AlertCircle, Cpu, Eye, Sparkles
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { LabOverviewItem } from '../../types';
 
 type FilterTab = 'all' | 'not_submitted' | 'pending' | 'assigned';
+
+type LabPreviewSlot = {
+  id: number;
+  lab_requirement_id: number;
+  class_id: number;
+  class_name: string;
+  subject_id: number;
+  subject_name: string;
+  subject_code: string;
+  lab_id: number;
+  lab_name: string;
+  day_order: number;
+  period: number;
+  preview_group: string;
+};
+
+type LabGridSlot = {
+  id: number;
+  class_id: number;
+  class_name: string;
+  subject_id: number;
+  subject_name: string;
+  subject_code: string;
+  lab_id: number;
+  lab_name: string;
+  day_order: number;
+  period: number;
+  type?: string;
+  lab_requirement_id?: number;
+  preview_group?: string;
+};
 
 export default function LabRequests() {
   const navigate = useNavigate();
@@ -20,15 +51,180 @@ export default function LabRequests() {
   const [departmentFilter, setDepartmentFilter] = useState<string>('all');
   const [yearFilter, setYearFilter] = useState<string>('all');
   const [search, setSearch] = useState('');
+  const [autoAssigning, setAutoAssigning] = useState(false);
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const [fixingPreview, setFixingPreview] = useState(false);
+  const [preview, setPreview] = useState<LabPreviewSlot[]>([]);
+  const [showPreview, setShowPreview] = useState(false);
+  const [moveDrafts, setMoveDrafts] = useState<Record<number, { to_day: number; to_period: number; to_lab_id: number | null }>>({});
+  const [movingId, setMovingId] = useState<number | null>(null);
+  const [draggingRowId, setDraggingRowId] = useState<number | null>(null);
+  const [showScheduleGrid, setShowScheduleGrid] = useState(false);
+  const [allLabSlots, setAllLabSlots] = useState<LabGridSlot[]>([]);
+  const [periodsPerDay, setPeriodsPerDay] = useState(6);
 
   const loadData = () => {
     fetch('/api/lab-requirements/overview').then(r => r.json()).then(setItems);
     fetch('/api/labs').then(r => r.json()).then(setLabs);
   };
 
+  const loadAllLabSlots = async () => {
+    const [slotsRes, settingsRes] = await Promise.all([
+      fetch('/api/timetable/labs'),
+      fetch('/api/settings'),
+    ]);
+
+    const slotsData = await slotsRes.json();
+    const settingsData = await settingsRes.json();
+
+    if (slotsRes.ok) {
+      setAllLabSlots(Array.isArray(slotsData) ? slotsData : []);
+    }
+    if (settingsRes.ok) {
+      const p = parseInt(settingsData.periods_per_day || '6', 10);
+      setPeriodsPerDay(Number.isFinite(p) && p > 0 ? p : 6);
+    }
+  };
+
   const itemKey = (item: LabOverviewItem) => `${item.class_id}-${item.subject_id}`;
 
   useEffect(() => { loadData(); }, []);
+
+  useEffect(() => {
+    if (showScheduleGrid) {
+      loadAllLabSlots();
+    }
+  }, [showScheduleGrid]);
+
+  const loadPreview = async () => {
+    setLoadingPreview(true);
+    const res = await fetch('/api/labs/preview');
+    const data = await res.json();
+    setLoadingPreview(false);
+    if (!res.ok) {
+      setStatus({ type: 'error', msg: data.error || 'Failed to load preview.' });
+      return;
+    }
+    setPreview(Array.isArray(data) ? data : []);
+  };
+
+  const handleAutoAssign = async () => {
+    setAutoAssigning(true);
+    setStatus(null);
+    const res = await fetch('/api/labs/assign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ days: [1, 2, 3, 4, 5, 6] })
+    });
+    const data = await res.json();
+    setAutoAssigning(false);
+    if (!res.ok) {
+      setStatus({ type: 'error', msg: data.error || 'Auto assign failed.' });
+      return;
+    }
+    setShowPreview(true);
+    await loadPreview();
+    loadData();
+    if (showScheduleGrid) await loadAllLabSlots();
+    setStatus({ type: 'success', msg: `Preview generated (${data.total_assigned_slots || 0} slots).` });
+  };
+
+  const handleFixPreview = async () => {
+    setFixingPreview(true);
+    setStatus(null);
+    const res = await fetch('/api/labs/fix', { method: 'POST' });
+    const data = await res.json();
+    setFixingPreview(false);
+    if (!res.ok) {
+      setStatus({ type: 'error', msg: data.error || 'Failed to fix preview.' });
+      return;
+    }
+    await loadPreview();
+    loadData();
+    if (showScheduleGrid) await loadAllLabSlots();
+    setStatus({ type: 'success', msg: `Lab timetable fixed (${data.applied || 0} slots committed).` });
+  };
+
+  const handleMovePreview = async (row: LabPreviewSlot) => {
+    const draft = moveDrafts[row.id];
+    if (!draft) {
+      setStatus({ type: 'error', msg: 'Choose day/period before moving.' });
+      return;
+    }
+
+    setMovingId(row.id);
+    setStatus(null);
+    const res = await fetch('/api/labs/preview/move', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        lab_requirement_id: row.lab_requirement_id,
+        from_day: row.day_order,
+        from_period: row.period,
+        to_day: Number(draft.to_day),
+        to_period: Number(draft.to_period),
+        to_lab_id: draft.to_lab_id ?? undefined,
+      })
+    });
+    const data = await res.json();
+    setMovingId(null);
+    if (!res.ok) {
+      setStatus({ type: 'error', msg: data.error || 'Failed to move preview slot.' });
+      return;
+    }
+    await loadPreview();
+    if (showScheduleGrid) await loadAllLabSlots();
+    setStatus({ type: 'success', msg: 'Preview slot moved.' });
+  };
+
+  const handleDropOnRow = async (target: LabPreviewSlot) => {
+    if (!draggingRowId || draggingRowId === target.id) return;
+    const source = preview.find(p => p.id === draggingRowId);
+    if (!source) return;
+
+    setMovingId(source.id);
+    setStatus(null);
+    const res = await fetch('/api/labs/preview/move', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        lab_requirement_id: source.lab_requirement_id,
+        from_day: source.day_order,
+        from_period: source.period,
+        to_day: target.day_order,
+        to_period: target.period,
+        to_lab_id: target.lab_id,
+      })
+    });
+    const data = await res.json();
+    setMovingId(null);
+    setDraggingRowId(null);
+    if (!res.ok) {
+      setStatus({ type: 'error', msg: data.error || 'Failed to move preview slot.' });
+      return;
+    }
+    await loadPreview();
+    if (showScheduleGrid) await loadAllLabSlots();
+    setStatus({ type: 'success', msg: 'Preview slot moved by drag-and-drop.' });
+  };
+
+  const gridSource: LabGridSlot[] = preview.length > 0
+    ? preview.map(p => ({
+        id: p.id,
+        class_id: p.class_id,
+        class_name: p.class_name,
+        subject_id: p.subject_id,
+        subject_name: p.subject_name,
+        subject_code: p.subject_code,
+        lab_id: p.lab_id,
+        lab_name: p.lab_name,
+        day_order: p.day_order,
+        period: p.period,
+        lab_requirement_id: p.lab_requirement_id,
+        preview_group: p.preview_group,
+        type: 'preview',
+      }))
+    : allLabSlots;
 
   const handleAssign = async (item: LabOverviewItem) => {
     if (!item.req_id) return;
@@ -135,7 +331,276 @@ export default function LabRequests() {
             </div>
           </div>
         </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-2 justify-end">
+          <button
+            onClick={handleAutoAssign}
+            disabled={autoAssigning}
+            className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white text-xs font-mono font-bold uppercase tracking-wider inline-flex items-center gap-2"
+          >
+            <Sparkles size={14} /> {autoAssigning ? 'Assigning…' : 'Auto Assign (Lab Solver)'}
+          </button>
+          <button
+            onClick={async () => {
+              setShowPreview(true);
+              await loadPreview();
+            }}
+            disabled={loadingPreview}
+            className="px-4 py-2 rounded-lg border border-[#2a3a57] text-slate-200 hover:border-cyan-500 text-xs font-mono font-bold uppercase tracking-wider inline-flex items-center gap-2"
+          >
+            <Eye size={14} /> {loadingPreview ? 'Loading…' : 'Open Preview'}
+          </button>
+          <button
+            onClick={() => setShowScheduleGrid(v => !v)}
+            className="px-4 py-2 rounded-lg border border-[#2a3a57] text-slate-200 hover:border-cyan-500 text-xs font-mono font-bold uppercase tracking-wider inline-flex items-center gap-2"
+          >
+            <Eye size={14} /> {showScheduleGrid ? 'Hide All Lab Grid' : 'View All Lab Grid'}
+          </button>
+          <button
+            onClick={handleFixPreview}
+            disabled={fixingPreview || preview.length === 0}
+            className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-mono font-bold uppercase tracking-wider inline-flex items-center gap-2"
+          >
+            <Cpu size={14} /> {fixingPreview ? 'Fixing…' : 'Fix Timetable'}
+          </button>
+        </div>
       </header>
+
+      {showPreview && (
+        <section className="rounded-xl border border-[#1e2d47] bg-[#0f1623] overflow-hidden">
+          <div className="px-4 py-3 border-b border-[#1e2d47] flex items-center justify-between">
+            <h2 className="text-sm font-mono font-bold uppercase tracking-wider text-white">Lab Preview</h2>
+            <span className="text-xs font-mono text-slate-400">{preview.length} slots</span>
+          </div>
+          <div className="p-4 overflow-x-auto">
+            {loadingPreview ? (
+              <div className="text-sm text-slate-400">Loading preview...</div>
+            ) : preview.length === 0 ? (
+              <div className="text-sm text-slate-400">No preview slots. Click Auto Assign to generate.</div>
+            ) : (
+              <div className="space-y-3">
+              <div className="text-[11px] font-mono text-slate-500">Tip: Drag a preview row and drop it on another row to move its session block quickly.</div>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-[10px] font-mono uppercase tracking-wider text-slate-500 border-b border-[#1e2d47]">
+                    <th className="py-2 pr-3">Class</th>
+                    <th className="py-2 pr-3">Subject</th>
+                    <th className="py-2 pr-3">Lab</th>
+                    <th className="py-2 pr-3">Day</th>
+                    <th className="py-2 pr-3">Period</th>
+                    <th className="py-2 pr-3">Move</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {preview.map(row => (
+                    <tr
+                      key={row.id}
+                      draggable
+                      onDragStart={() => setDraggingRowId(row.id)}
+                      onDragOver={e => e.preventDefault()}
+                      onDrop={async e => {
+                        e.preventDefault();
+                        await handleDropOnRow(row);
+                      }}
+                      className={`border-b border-[#1e2d47]/40 ${draggingRowId === row.id ? 'opacity-40' : ''}`}
+                    >
+                      <td className="py-2 pr-3 text-slate-200">{row.class_name}</td>
+                      <td className="py-2 pr-3 text-slate-300">{row.subject_name} <span className="text-slate-500">({row.subject_code})</span></td>
+                      <td className="py-2 pr-3 text-cyan-300">{row.lab_name}</td>
+                      <td className="py-2 pr-3 text-slate-300">{row.day_order}</td>
+                      <td className="py-2 pr-3 text-slate-300">{row.period}</td>
+                      <td className="py-2 pr-3">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <select
+                            className="bg-[#0a0e17] border border-[#2a3a57] rounded px-2 py-1 text-xs"
+                            value={moveDrafts[row.id]?.to_day ?? row.day_order}
+                            onChange={e => setMoveDrafts(prev => ({
+                              ...prev,
+                              [row.id]: {
+                                to_day: parseInt(e.target.value, 10),
+                                to_period: prev[row.id]?.to_period ?? row.period,
+                                to_lab_id: prev[row.id]?.to_lab_id ?? row.lab_id,
+                              }
+                            }))}
+                          >
+                            {[1, 2, 3, 4, 5, 6].map(d => <option key={d} value={d}>Day {d}</option>)}
+                          </select>
+                          <select
+                            className="bg-[#0a0e17] border border-[#2a3a57] rounded px-2 py-1 text-xs"
+                            value={moveDrafts[row.id]?.to_period ?? row.period}
+                            onChange={e => setMoveDrafts(prev => ({
+                              ...prev,
+                              [row.id]: {
+                                to_day: prev[row.id]?.to_day ?? row.day_order,
+                                to_period: parseInt(e.target.value, 10),
+                                to_lab_id: prev[row.id]?.to_lab_id ?? row.lab_id,
+                              }
+                            }))}
+                          >
+                            {[1, 2, 3, 4, 5, 6].map(p => <option key={p} value={p}>P{p}</option>)}
+                          </select>
+                          <select
+                            className="bg-[#0a0e17] border border-[#2a3a57] rounded px-2 py-1 text-xs"
+                            value={moveDrafts[row.id]?.to_lab_id ?? row.lab_id}
+                            onChange={e => setMoveDrafts(prev => ({
+                              ...prev,
+                              [row.id]: {
+                                to_day: prev[row.id]?.to_day ?? row.day_order,
+                                to_period: prev[row.id]?.to_period ?? row.period,
+                                to_lab_id: parseInt(e.target.value, 10),
+                              }
+                            }))}
+                          >
+                            {labs.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                          </select>
+                          <button
+                            onClick={() => handleMovePreview(row)}
+                            disabled={movingId === row.id}
+                            className="px-2 py-1 rounded bg-[#1a2c49] hover:bg-[#22365a] text-xs font-mono text-cyan-300"
+                          >
+                            {movingId === row.id ? 'Moving…' : 'Move'}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {showScheduleGrid && (
+        <section className="rounded-xl border border-[#1e2d47] bg-[#0f1623] overflow-hidden">
+          <div className="px-4 py-3 border-b border-[#1e2d47] flex items-center justify-between gap-2 flex-wrap">
+            <h2 className="text-sm font-mono font-bold uppercase tracking-wider text-white">All Lab Schedule Grid</h2>
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-mono text-slate-400">
+                Mode: {preview.length > 0 ? 'Preview (draggable)' : 'Committed Timetable'}
+              </span>
+              {preview.length > 0 && (
+                <button
+                  onClick={handleFixPreview}
+                  disabled={fixingPreview}
+                  className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-[10px] font-mono font-bold uppercase tracking-wider"
+                >
+                  {fixingPreview ? 'Fixing…' : 'Fix Schedule'}
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="p-4 space-y-6">
+            {labs.map(lab => {
+              const labSlots = gridSource.filter(s => s.lab_id === lab.id);
+              const periods = Array.from({ length: periodsPerDay }, (_, i) => i + 1);
+              const days = [1, 2, 3, 4, 5, 6];
+              return (
+                <div key={`grid-${lab.id}`} className="rounded-lg border border-[#1e2d47] overflow-hidden">
+                  <div className="px-3 py-2 bg-[#141c2e] border-b border-[#1e2d47] flex items-center justify-between">
+                    <h3 className="text-xs font-mono font-bold text-cyan-300 uppercase tracking-wider">{lab.name}</h3>
+                    <span className="text-[10px] font-mono text-slate-500">{labSlots.length} slots</span>
+                  </div>
+                  <div className="overflow-x-auto p-2">
+                    <table className="w-full text-xs border-collapse">
+                      <thead>
+                        <tr>
+                          <th className="p-2 text-left text-[10px] font-mono text-slate-500">Day</th>
+                          {periods.map(p => (
+                            <th key={`ph-${lab.id}-${p}`} className="p-2 text-center text-[10px] font-mono text-slate-500">P{p}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {days.map(day => (
+                          <tr key={`d-${lab.id}-${day}`} className="border-t border-[#1e2d47]/40">
+                            <td className="p-2 font-mono text-slate-400">Day {day}</td>
+                            {periods.map(period => {
+                              const slot = labSlots.find(s => s.day_order === day && s.period === period);
+                              return (
+                                <td
+                                  key={`c-${lab.id}-${day}-${period}`}
+                                  className="p-1"
+                                  onDragOver={e => {
+                                    if (preview.length > 0) e.preventDefault();
+                                  }}
+                                  onDrop={async e => {
+                                    e.preventDefault();
+                                    if (!draggingRowId || preview.length === 0) return;
+                                    const target = {
+                                      id: -1,
+                                      lab_requirement_id: slot?.lab_requirement_id || preview.find(p => p.id === draggingRowId)?.lab_requirement_id || 0,
+                                      class_id: slot?.class_id || 0,
+                                      class_name: slot?.class_name || '',
+                                      subject_id: slot?.subject_id || 0,
+                                      subject_name: slot?.subject_name || '',
+                                      subject_code: slot?.subject_code || '',
+                                      lab_id: lab.id,
+                                      lab_name: lab.name,
+                                      day_order: day,
+                                      period,
+                                      preview_group: slot?.preview_group || '',
+                                    } as LabPreviewSlot;
+
+                                    const source = preview.find(p => p.id === draggingRowId);
+                                    if (!source) return;
+                                    setMovingId(source.id);
+                                    const res = await fetch('/api/labs/preview/move', {
+                                      method: 'PATCH',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({
+                                        lab_requirement_id: source.lab_requirement_id,
+                                        from_day: source.day_order,
+                                        from_period: source.period,
+                                        to_day: target.day_order,
+                                        to_period: target.period,
+                                        to_lab_id: target.lab_id,
+                                      })
+                                    });
+                                    const data = await res.json();
+                                    setMovingId(null);
+                                    setDraggingRowId(null);
+                                    if (!res.ok) {
+                                      setStatus({ type: 'error', msg: data.error || 'Failed to move by grid drag-drop.' });
+                                      return;
+                                    }
+                                    await loadPreview();
+                                    await loadAllLabSlots();
+                                    setStatus({ type: 'success', msg: 'Grid move applied.' });
+                                  }}
+                                >
+                                  <div
+                                    draggable={!!slot && preview.length > 0}
+                                    onDragStart={() => {
+                                      if (slot && preview.length > 0) setDraggingRowId(slot.id);
+                                    }}
+                                    className={`min-h-[56px] rounded border px-2 py-1 ${slot ? 'border-cyan-500/20 bg-cyan-500/5 text-slate-200' : 'border-dashed border-[#1e2d47] text-slate-600'} ${movingId === slot?.id ? 'opacity-40' : ''}`}
+                                  >
+                                    {slot ? (
+                                      <>
+                                        <div className="font-semibold truncate">{slot.class_name}</div>
+                                        <div className="text-[10px] text-cyan-300 truncate">{slot.subject_code}</div>
+                                      </>
+                                    ) : (
+                                      <span className="text-[10px] font-mono">FREE</span>
+                                    )}
+                                  </div>
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {counts.not_submitted > 0 && (
         <div className="rounded-xl border border-slate-500/20 bg-slate-500/5 px-4 py-3 flex items-start gap-3">

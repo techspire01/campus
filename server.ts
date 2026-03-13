@@ -112,6 +112,19 @@ async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (placement_block_id, class_id, day_order, period)
     );
+
+    CREATE TABLE IF NOT EXISTS cg_lab_preview_slots (
+      id SERIAL PRIMARY KEY,
+      lab_requirement_id INTEGER NOT NULL REFERENCES cg_lab_requirements(id) ON DELETE CASCADE,
+      class_id INTEGER NOT NULL REFERENCES cg_classes(id) ON DELETE CASCADE,
+      subject_id INTEGER NOT NULL REFERENCES cg_subjects(id) ON DELETE CASCADE,
+      lab_id INTEGER NOT NULL REFERENCES cg_labs(id) ON DELETE CASCADE,
+      day_order INTEGER NOT NULL,
+      period INTEGER NOT NULL,
+      preview_group TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'preview',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `);
 
   await pool.query(`
@@ -142,6 +155,21 @@ async function ensureSchema() {
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS udx_lab_req_class_subject
     ON cg_lab_requirements(class_id, subject_id);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_lab_preview_req
+    ON cg_lab_preview_slots(lab_requirement_id);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_lab_preview_class_slot
+    ON cg_lab_preview_slots(class_id, day_order, period);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_lab_preview_lab_slot
+    ON cg_lab_preview_slots(lab_id, day_order, period);
   `);
 }
 
@@ -181,6 +209,48 @@ type SchedulerAssignment = {
 
 type SchedulerResponse =
   | { ok: true; assignments: SchedulerAssignment[] }
+  | { ok: false; error: string };
+
+type LabSchedulerRequest = {
+  classes: Array<{
+    id: number;
+    class_id: number;
+    subject_id: number;
+    subject_name?: string;
+    subject_code?: string;
+    class_strength: number;
+    lab_hours: number;
+    requirements: string | null;
+  }>;
+  labs: Array<{
+    id: number;
+    systems: number;
+    os_installed: string | null;
+    system_spec: string | null;
+    name: string;
+  }>;
+  periods_per_day: number;
+  days: number[];
+  blocked: {
+    class_slots: Record<string, Array<{ day_order: number; period: number }>>;
+    lab_slots: Record<string, Array<{ day_order: number; period: number }>>;
+  };
+};
+
+type LabSchedulerResponse =
+  | {
+      ok: true;
+      assignments: Array<{
+        lab_requirement_id: number;
+        class_id: number;
+        subject_id: number;
+        lab_id: number;
+        day_order: number;
+        period: number;
+        preview_group: string;
+      }>;
+      unassigned?: number[];
+    }
   | { ok: false; error: string };
 
 type PlacementGroupInfo = {
@@ -344,6 +414,49 @@ function runPlacementScheduler(payload: SchedulerRequest): Promise<SchedulerResp
         resolve(JSON.parse(stdout) as SchedulerResponse);
       } catch {
         reject(new Error(`Invalid scheduler output: ${stdout || stderr}`));
+      }
+    });
+
+    python.stdin.write(JSON.stringify(payload));
+    python.stdin.end();
+  });
+}
+
+function runLabScheduler(payload: LabSchedulerRequest): Promise<LabSchedulerResponse> {
+  return new Promise((resolve, reject) => {
+    const configuredPython = process.env.PYTHON_PATH;
+    const workspaceVenvWindows = path.join(process.cwd(), '.venv', 'Scripts', 'python.exe');
+    const workspaceVenvUnix = path.join(process.cwd(), '.venv', 'bin', 'python');
+    const pythonBinary = configuredPython
+      || (fs.existsSync(workspaceVenvWindows) ? workspaceVenvWindows : '')
+      || (fs.existsSync(workspaceVenvUnix) ? workspaceVenvUnix : '')
+      || 'python';
+    const scriptPath = path.join(process.cwd(), 'scheduler', 'lab_solver.py');
+    const python = spawn(pythonBinary, [scriptPath]);
+
+    let stdout = '';
+    let stderr = '';
+
+    python.stdout.on('data', (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+
+    python.stderr.on('data', (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+
+    python.on('error', reject);
+
+    python.on('close', code => {
+      if (code !== 0) {
+        reject(new Error(`Lab solver failed with code ${code}: ${stderr || stdout}`));
+        return;
+      }
+
+      try {
+        resolve(JSON.parse(stdout) as LabSchedulerResponse);
+      } catch {
+        reject(new Error(`Invalid lab solver output: ${stdout || stderr}`));
       }
     });
 
@@ -771,7 +884,7 @@ async function startServer() {
     }
   });
 
-  app.get('/api/labs/:id', async (req, res) => {
+  app.get('/api/labs/:id(\\d+)', async (req, res) => {
     try {
       const labId = Number(req.params.id);
       const { rows } = await pool.query('SELECT * FROM cg_labs WHERE id = $1', [labId]);
@@ -782,7 +895,7 @@ async function startServer() {
     }
   });
 
-  app.patch('/api/labs/:id', async (req, res) => {
+  app.patch('/api/labs/:id(\\d+)', async (req, res) => {
     try {
       const labId = Number(req.params.id);
       const existing = await pool.query('SELECT id FROM cg_labs WHERE id = $1', [labId]);
@@ -813,7 +926,7 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/labs/:id', async (req, res) => {
+  app.delete('/api/labs/:id(\\d+)', async (req, res) => {
     try {
       const labId = Number(req.params.id);
       const existing = await pool.query('SELECT id FROM cg_labs WHERE id = $1', [labId]);
@@ -961,6 +1074,341 @@ async function startServer() {
     }
   });
 
+  app.post('/api/labs/assign', async (req, res) => {
+    try {
+      const toInt = (value: any, name: string): number => {
+        const n = Number(value);
+        if (!Number.isFinite(n)) throw new Error(`Invalid numeric value for ${name}: ${value}`);
+        return Math.trunc(n);
+      };
+
+      const days = Array.isArray(req.body?.days) && req.body.days.length
+        ? req.body.days.map((d: any) => toInt(d, 'days[]')).filter((d: number) => d >= 1)
+        : [1, 2, 3, 4, 5, 6];
+
+      const settingsRows = await pool.query('SELECT key, value FROM cg_settings');
+      const settings = settingsRows.rows.reduce((acc: Record<string, string>, row: { key: string; value: string }) => {
+        acc[row.key] = row.value;
+        return acc;
+      }, {});
+      const periodsPerDay = toInt(settings.periods_per_day || 6, 'periods_per_day');
+
+      const reqRows = await pool.query(`
+        SELECT
+          lr.id,
+          lr.class_id,
+          lr.subject_id,
+          s.name AS subject_name,
+          s.code AS subject_code,
+          COALESCE(lr.duration, cs.hours_per_week) AS lab_hours,
+          lr.requirements,
+          c.student_strength
+        FROM cg_lab_requirements lr
+        JOIN cg_classes c ON c.id = lr.class_id
+        JOIN cg_class_subjects cs ON cs.class_id = lr.class_id AND cs.subject_id = lr.subject_id
+        JOIN cg_subjects s ON s.id = lr.subject_id
+        WHERE lr.status IN ('pending', 'assigned')
+      `);
+
+      const labRows = await pool.query(`
+        SELECT id, name, systems_count, os_installed, systems_specification
+        FROM cg_labs
+      `);
+
+      if ((reqRows.rowCount ?? 0) === 0) {
+        return res.status(400).json({ error: 'No lab requirements found to assign.' });
+      }
+      if ((labRows.rowCount ?? 0) === 0) {
+        return res.status(400).json({ error: 'No labs available for assignment.' });
+      }
+
+      const classBusy = await pool.query(`
+        SELECT class_id, day_order, period
+        FROM cg_timetable_slots
+      `);
+      const labBusy = await pool.query(`
+        SELECT lab_id, day_order, period
+        FROM cg_timetable_slots
+        WHERE lab_id IS NOT NULL
+      `);
+
+      const classSlots: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const r of classBusy.rows as Array<{ class_id: number; day_order: number; period: number }>) {
+        const key = String(r.class_id);
+        if (!classSlots[key]) classSlots[key] = [];
+        classSlots[key].push({ day_order: r.day_order, period: r.period });
+      }
+
+      const labSlots: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const r of labBusy.rows as Array<{ lab_id: number; day_order: number; period: number }>) {
+        const key = String(r.lab_id);
+        if (!labSlots[key]) labSlots[key] = [];
+        labSlots[key].push({ day_order: r.day_order, period: r.period });
+      }
+
+      const payload: LabSchedulerRequest = {
+        classes: reqRows.rows.map((r: any) => ({
+          id: toInt(r.id, 'lab_requirement.id'),
+          class_id: toInt(r.class_id, 'lab_requirement.class_id'),
+          subject_id: toInt(r.subject_id, 'lab_requirement.subject_id'),
+          subject_name: r.subject_name,
+          subject_code: r.subject_code,
+          class_strength: toInt(r.student_strength || 0, 'class.student_strength'),
+          lab_hours: toInt(r.lab_hours || 1, 'lab_requirement.lab_hours'),
+          requirements: r.requirements,
+        })),
+        labs: labRows.rows.map((r: any) => ({
+          id: toInt(r.id, 'lab.id'),
+          systems: toInt(r.systems_count || 0, 'lab.systems_count'),
+          os_installed: r.os_installed,
+          system_spec: r.systems_specification,
+          name: r.name,
+        })),
+        periods_per_day: periodsPerDay,
+        days,
+        blocked: {
+          class_slots: classSlots,
+          lab_slots: labSlots,
+        },
+      };
+
+      const solved = await runLabScheduler(payload);
+      if (!solved.ok) {
+        const msg = 'error' in solved ? solved.error : 'Lab assignment failed.';
+        return res.status(400).json({ error: msg });
+      }
+
+      await inTransaction(async client => {
+        await client.query("DELETE FROM cg_lab_preview_slots WHERE status = 'preview'");
+
+        for (const a of solved.assignments) {
+          const reqId = toInt(a.lab_requirement_id, 'assignment.lab_requirement_id');
+          const classId = toInt(a.class_id, 'assignment.class_id');
+          const subjectId = toInt(a.subject_id, 'assignment.subject_id');
+          const labId = toInt(a.lab_id, 'assignment.lab_id');
+          const dayOrder = toInt(a.day_order, 'assignment.day_order');
+          const period = toInt(a.period, 'assignment.period');
+
+          await client.query(
+            `INSERT INTO cg_lab_preview_slots
+              (lab_requirement_id, class_id, subject_id, lab_id, day_order, period, preview_group, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'preview')`,
+            [
+              reqId,
+              classId,
+              subjectId,
+              labId,
+              dayOrder,
+              period,
+              a.preview_group,
+            ]
+          );
+        }
+      });
+
+      res.json({
+        success: true,
+        total_assigned_slots: solved.assignments.length,
+        unassigned_requirements: solved.unassigned || [],
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/labs/preview', async (req, res) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT
+          p.*,
+          c.name AS class_name,
+          s.name AS subject_name,
+          s.code AS subject_code,
+          l.name AS lab_name,
+          lr.status AS requirement_status
+        FROM cg_lab_preview_slots p
+        JOIN cg_classes c ON c.id = p.class_id
+        JOIN cg_subjects s ON s.id = p.subject_id
+        JOIN cg_labs l ON l.id = p.lab_id
+        JOIN cg_lab_requirements lr ON lr.id = p.lab_requirement_id
+        WHERE p.status = 'preview'
+        ORDER BY p.day_order, p.period, c.name
+      `);
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.patch('/api/labs/preview/move', async (req, res) => {
+    try {
+      const { lab_requirement_id, from_day, from_period, to_day, to_period, to_lab_id } = req.body;
+      if (!lab_requirement_id || !from_day || !from_period || !to_day || !to_period) {
+        return res.status(400).json({ error: 'lab_requirement_id, from_day, from_period, to_day, to_period are required.' });
+      }
+
+      const settingsRows = await pool.query('SELECT key, value FROM cg_settings');
+      const settings = settingsRows.rows.reduce((acc: Record<string, string>, row: { key: string; value: string }) => {
+        acc[row.key] = row.value;
+        return acc;
+      }, {});
+      const periodsPerDay = Number(settings.periods_per_day || 6);
+
+      await inTransaction(async client => {
+        const sourceSlot = await client.query(
+          `SELECT *
+           FROM cg_lab_preview_slots
+           WHERE lab_requirement_id = $1 AND day_order = $2 AND period = $3 AND status = 'preview'
+           LIMIT 1`,
+          [Number(lab_requirement_id), Number(from_day), Number(from_period)]
+        );
+        if ((sourceSlot.rowCount ?? 0) === 0) {
+          throw new Error('Source preview slot not found.');
+        }
+
+        const source = sourceSlot.rows[0] as {
+          class_id: number;
+          lab_id: number;
+          preview_group: string;
+        };
+
+        const groupRows = await client.query(
+          `SELECT id, day_order, period, class_id, lab_id
+           FROM cg_lab_preview_slots
+           WHERE lab_requirement_id = $1 AND preview_group = $2 AND status = 'preview'
+           ORDER BY period`,
+          [Number(lab_requirement_id), source.preview_group]
+        );
+        const rows = groupRows.rows as Array<{ id: number; day_order: number; period: number; class_id: number; lab_id: number }>;
+        if (rows.length === 0) throw new Error('Preview group not found.');
+
+        const minPeriod = Math.min(...rows.map(r => r.period));
+        const targetLabId = to_lab_id ? Number(to_lab_id) : source.lab_id;
+
+        for (const r of rows) {
+          const periodShift = r.period - minPeriod;
+          const newPeriod = Number(to_period) + periodShift;
+          if (newPeriod < 1 || newPeriod > periodsPerDay) {
+            throw new Error('Move exceeds valid period range.');
+          }
+
+          const classConflict = await client.query(
+            `SELECT 1 FROM cg_lab_preview_slots
+             WHERE class_id = $1 AND day_order = $2 AND period = $3 AND status = 'preview' AND id <> $4
+             LIMIT 1`,
+            [source.class_id, Number(to_day), newPeriod, r.id]
+          );
+          if ((classConflict.rowCount ?? 0) > 0) throw new Error('Class conflict in preview slots.');
+
+          const labConflict = await client.query(
+            `SELECT 1 FROM cg_lab_preview_slots
+             WHERE lab_id = $1 AND day_order = $2 AND period = $3 AND status = 'preview' AND id <> $4
+             LIMIT 1`,
+            [targetLabId, Number(to_day), newPeriod, r.id]
+          );
+          if ((labConflict.rowCount ?? 0) > 0) throw new Error('Lab conflict in preview slots.');
+
+          const classFixedConflict = await client.query(
+            `SELECT 1 FROM cg_timetable_slots
+             WHERE class_id = $1 AND day_order = $2 AND period = $3
+             LIMIT 1`,
+            [source.class_id, Number(to_day), newPeriod]
+          );
+          if ((classFixedConflict.rowCount ?? 0) > 0) throw new Error('Target class slot already occupied in timetable.');
+
+          const labFixedConflict = await client.query(
+            `SELECT 1 FROM cg_timetable_slots
+             WHERE lab_id = $1 AND day_order = $2 AND period = $3
+             LIMIT 1`,
+            [targetLabId, Number(to_day), newPeriod]
+          );
+          if ((labFixedConflict.rowCount ?? 0) > 0) throw new Error('Target lab slot already occupied in timetable.');
+        }
+
+        for (const r of rows) {
+          const periodShift = r.period - minPeriod;
+          const newPeriod = Number(to_period) + periodShift;
+          await client.query(
+            `UPDATE cg_lab_preview_slots
+             SET day_order = $1, period = $2, lab_id = $3
+             WHERE id = $4`,
+            [Number(to_day), newPeriod, targetLabId, r.id]
+          );
+        }
+      });
+
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/labs/fix', async (req, res) => {
+    try {
+      const summary = await inTransaction(async client => {
+        const previewRows = await client.query(
+          `SELECT * FROM cg_lab_preview_slots WHERE status = 'preview' ORDER BY day_order, period`
+        );
+        const rows = previewRows.rows as Array<{
+          lab_requirement_id: number;
+          class_id: number;
+          subject_id: number;
+          lab_id: number;
+          day_order: number;
+          period: number;
+        }>;
+
+        if (rows.length === 0) {
+          return { applied: 0, requirements: 0 };
+        }
+
+        for (const row of rows) {
+          const staff = await client.query(
+            `SELECT staff_id FROM cg_class_subjects WHERE class_id = $1 AND subject_id = $2 LIMIT 1`,
+            [row.class_id, row.subject_id]
+          );
+          const staffId = (staff.rows[0]?.staff_id ?? null) as number | null;
+
+          await client.query(
+            `INSERT INTO cg_timetable_slots
+              (class_id, day_order, period, subject_id, staff_id, lab_id, type, is_locked)
+             VALUES ($1, $2, $3, $4, $5, $6, 'lab', false)
+             ON CONFLICT (class_id, day_order, period) DO UPDATE
+               SET subject_id = EXCLUDED.subject_id,
+                   staff_id = EXCLUDED.staff_id,
+                   lab_id = EXCLUDED.lab_id,
+                   type = EXCLUDED.type`,
+            [row.class_id, row.day_order, row.period, row.subject_id, staffId, row.lab_id]
+          );
+        }
+
+        await client.query(`
+          UPDATE cg_lab_requirements lr
+          SET status = 'assigned',
+              lab_id = picked.lab_id
+          FROM (
+            SELECT lab_requirement_id, MIN(lab_id) AS lab_id
+            FROM cg_lab_preview_slots
+            WHERE status = 'preview'
+            GROUP BY lab_requirement_id
+          ) picked
+          WHERE lr.id = picked.lab_requirement_id
+        `);
+
+        await client.query("DELETE FROM cg_lab_preview_slots WHERE status = 'preview'");
+
+        return {
+          applied: rows.length,
+          requirements: new Set(rows.map(r => r.lab_requirement_id)).size,
+        };
+      });
+
+      res.json({ success: true, ...summary });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
   app.get('/api/timetable/lab/:labId', async (req, res) => {
     try {
       const labId = Number(req.params.labId);
@@ -975,6 +1423,34 @@ async function startServer() {
         WHERE ts.lab_id = $1
         ORDER BY ts.day_order, ts.period
       `, [labId]);
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/timetable/labs', async (req, res) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT
+          ts.id,
+          ts.class_id,
+          c.name AS class_name,
+          ts.subject_id,
+          s.name AS subject_name,
+          s.code AS subject_code,
+          ts.lab_id,
+          l.name AS lab_name,
+          ts.day_order,
+          ts.period,
+          ts.type
+        FROM cg_timetable_slots ts
+        JOIN cg_classes c ON c.id = ts.class_id
+        LEFT JOIN cg_subjects s ON s.id = ts.subject_id
+        JOIN cg_labs l ON l.id = ts.lab_id
+        WHERE ts.lab_id IS NOT NULL
+        ORDER BY l.name, ts.day_order, ts.period, c.name
+      `);
       res.json(rows);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
