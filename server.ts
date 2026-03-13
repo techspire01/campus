@@ -1,806 +1,863 @@
-import express from "express";
-import { createServer as createViteServer } from "vite";
-import path from "path";
-import Database from "better-sqlite3";
+import 'dotenv/config';
+import express from 'express';
+import { createServer as createViteServer } from 'vite';
+import path from 'path';
+import { Pool, PoolClient } from 'pg';
 
-const db = new Database("timetable.db");
+const pool = new Pool({
+  connectionString: process.env.SUPABASE_DB_URL || process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
-// Initialize Database Schema
-db.exec(`
-  CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS departments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    type TEXT CHECK(type IN ('core', 'common')) NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS staff (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    role TEXT CHECK(role IN ('HOD', 'Staff')) NOT NULL,
-    dept_id INTEGER,
-    max_workload INTEGER NOT NULL,
-    FOREIGN KEY (dept_id) REFERENCES departments(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS subjects (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    code TEXT NOT NULL UNIQUE,
-    type TEXT CHECK(type IN ('core', 'common', 'lab')) NOT NULL,
-    dept_id INTEGER,
-    is_addon BOOLEAN DEFAULT 0,
-    FOREIGN KEY (dept_id) REFERENCES departments(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS classes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    dept_id INTEGER NOT NULL,
-    year INTEGER NOT NULL,
-    semester INTEGER NOT NULL,
-    student_strength INTEGER DEFAULT 0,
-    tutor_staff_id INTEGER,
-    FOREIGN KEY (dept_id) REFERENCES departments(id),
-    FOREIGN KEY (tutor_staff_id) REFERENCES staff(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS class_subjects (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    class_id INTEGER NOT NULL,
-    subject_id INTEGER NOT NULL,
-    staff_id INTEGER,
-    hours_per_week INTEGER NOT NULL,
-    is_lab_required BOOLEAN DEFAULT 0,
-    FOREIGN KEY (class_id) REFERENCES classes(id),
-    FOREIGN KEY (subject_id) REFERENCES subjects(id),
-    FOREIGN KEY (staff_id) REFERENCES staff(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS labs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    dept_id INTEGER,
-    systems_count INTEGER NOT NULL,
-    FOREIGN KEY (dept_id) REFERENCES departments(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS lab_requirements (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    class_id INTEGER NOT NULL,
-    subject_id INTEGER NOT NULL,
-    duration INTEGER NOT NULL,
-    requirements TEXT,
-    FOREIGN KEY (class_id) REFERENCES classes(id),
-    FOREIGN KEY (subject_id) REFERENCES subjects(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS timetable_slots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    class_id INTEGER NOT NULL,
-    day_order INTEGER NOT NULL,
-    period INTEGER NOT NULL,
-    subject_id INTEGER,
-    staff_id INTEGER,
-    lab_id INTEGER,
-    is_locked BOOLEAN DEFAULT 0,
-    type TEXT, -- 'common', 'core', 'lab', 'placement', 'activity', 'pt', 'library'
-    FOREIGN KEY (class_id) REFERENCES classes(id),
-    FOREIGN KEY (subject_id) REFERENCES subjects(id),
-    FOREIGN KEY (staff_id) REFERENCES staff(id),
-    FOREIGN KEY (lab_id) REFERENCES labs(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS placement_blocks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    hours INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS placement_classes (
-    placement_id INTEGER NOT NULL,
-    class_id INTEGER NOT NULL,
-    PRIMARY KEY (placement_id, class_id),
-    FOREIGN KEY (placement_id) REFERENCES placement_blocks(id),
-    FOREIGN KEY (class_id) REFERENCES classes(id)
-  );
-`);
-
-const classColumns = db.prepare("PRAGMA table_info(classes)").all() as { name: string }[];
-if (!classColumns.some((column) => column.name === "tutor_staff_id")) {
-  db.exec("ALTER TABLE classes ADD COLUMN tutor_staff_id INTEGER REFERENCES staff(id)");
-}
-
-// Seed initial settings if not present
-const seedSettings = db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)");
-seedSettings.run("college_start_time", "09:45");
-seedSettings.run("college_end_time", "15:45");
-seedSettings.run("periods_per_day", "6");
-seedSettings.run("break_duration", "15");
-seedSettings.run("break_after_period", "2");
-seedSettings.run("lunch_duration", "45");
-seedSettings.run("lunch_after_period", "3");
-
-// Seed Departments, Staff, and Classes
 const departmentsToSeed = [
-  { name: "B.Com", type: "core", years: 3 },
-  { name: "B.Com CA", type: "core", years: 3 },
-  { name: "B.Com PA", type: "core", years: 3 },
-  { name: "B.Com IT", type: "core", years: 3 },
-  { name: "BBA CA", type: "core", years: 3 },
-  { name: "B.Sc CSHM", type: "core", years: 3 },
-  { name: "B.Sc CS", type: "core", years: 3 },
-  { name: "B.Sc AI & ML", type: "core", years: 3 },
-  { name: "B.Sc CSDA", type: "core", years: 3 },
-  { name: "B.Sc IT", type: "core", years: 3 },
-  { name: "MBA", type: "core", years: 2 },
-  { name: "M.Sc CS", type: "core", years: 2 },
-  { name: "M.Com", type: "core", years: 2 },
+  { name: 'B.Com', type: 'core', years: 3 },
+  { name: 'B.Com CA', type: 'core', years: 3 },
+  { name: 'B.Com PA', type: 'core', years: 3 },
+  { name: 'B.Com IT', type: 'core', years: 3 },
+  { name: 'BBA CA', type: 'core', years: 3 },
+  { name: 'B.Sc CSHM', type: 'core', years: 3 },
+  { name: 'B.Sc CS', type: 'core', years: 3 },
+  { name: 'B.Sc AI & ML', type: 'core', years: 3 },
+  { name: 'B.Sc CSDA', type: 'core', years: 3 },
+  { name: 'B.Sc IT', type: 'core', years: 3 },
+  { name: 'MBA', type: 'core', years: 2 },
+  { name: 'M.Sc CS', type: 'core', years: 2 },
+  { name: 'M.Com', type: 'core', years: 2 }
 ];
 
-const seedData = () => {
-  const checkDept = db.prepare("SELECT id FROM departments WHERE name = ?");
-  const insertDept = db.prepare("INSERT INTO departments (name, type) VALUES (?, ?)");
-  const insertStaff = db.prepare("INSERT INTO staff (name, role, dept_id, max_workload) VALUES (?, ?, ?, ?)");
-  const insertClass = db.prepare("INSERT INTO classes (name, dept_id, year, semester) VALUES (?, ?, ?, ?)");
+async function ensureSchema() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cg_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS cg_departments (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      type TEXT NOT NULL CHECK (type IN ('core', 'common'))
+    );
+
+    CREATE TABLE IF NOT EXISTS cg_staff (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('HOD', 'Staff')),
+      dept_id INTEGER REFERENCES cg_departments(id) ON DELETE SET NULL,
+      max_workload INTEGER NOT NULL DEFAULT 18
+    );
+
+    CREATE TABLE IF NOT EXISTS cg_subjects (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      code TEXT NOT NULL UNIQUE,
+      type TEXT NOT NULL CHECK (type IN ('core', 'common', 'lab')),
+      dept_id INTEGER REFERENCES cg_departments(id) ON DELETE SET NULL,
+      is_addon BOOLEAN NOT NULL DEFAULT FALSE
+    );
+
+    CREATE TABLE IF NOT EXISTS cg_classes (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      dept_id INTEGER NOT NULL REFERENCES cg_departments(id) ON DELETE CASCADE,
+      year INTEGER NOT NULL,
+      semester INTEGER NOT NULL,
+      student_strength INTEGER NOT NULL DEFAULT 0,
+      tutor_staff_id INTEGER REFERENCES cg_staff(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS cg_class_subjects (
+      id SERIAL PRIMARY KEY,
+      class_id INTEGER NOT NULL REFERENCES cg_classes(id) ON DELETE CASCADE,
+      subject_id INTEGER NOT NULL REFERENCES cg_subjects(id) ON DELETE CASCADE,
+      staff_id INTEGER REFERENCES cg_staff(id) ON DELETE SET NULL,
+      hours_per_week INTEGER NOT NULL,
+      is_lab_required BOOLEAN NOT NULL DEFAULT FALSE,
+      UNIQUE (class_id, subject_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS cg_labs (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      dept_id INTEGER REFERENCES cg_departments(id) ON DELETE SET NULL,
+      systems_count INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS cg_lab_requirements (
+      id SERIAL PRIMARY KEY,
+      class_id INTEGER NOT NULL REFERENCES cg_classes(id) ON DELETE CASCADE,
+      subject_id INTEGER NOT NULL REFERENCES cg_subjects(id) ON DELETE CASCADE,
+      duration INTEGER NOT NULL,
+      requirements TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS cg_timetable_slots (
+      id SERIAL PRIMARY KEY,
+      class_id INTEGER NOT NULL REFERENCES cg_classes(id) ON DELETE CASCADE,
+      day_order INTEGER NOT NULL,
+      period INTEGER NOT NULL,
+      subject_id INTEGER REFERENCES cg_subjects(id) ON DELETE SET NULL,
+      staff_id INTEGER REFERENCES cg_staff(id) ON DELETE SET NULL,
+      lab_id INTEGER REFERENCES cg_labs(id) ON DELETE SET NULL,
+      is_locked BOOLEAN NOT NULL DEFAULT FALSE,
+      type TEXT,
+      UNIQUE (class_id, day_order, period)
+    );
+
+    CREATE TABLE IF NOT EXISTS cg_placement_blocks (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      hours INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS cg_placement_classes (
+      placement_id INTEGER NOT NULL REFERENCES cg_placement_blocks(id) ON DELETE CASCADE,
+      class_id INTEGER NOT NULL REFERENCES cg_classes(id) ON DELETE CASCADE,
+      PRIMARY KEY (placement_id, class_id)
+    );
+  `);
+}
+
+async function seedDefaults() {
+  const defaults = {
+    college_start_time: '09:45',
+    college_end_time: '15:45',
+    periods_per_day: '6',
+    break_duration: '15',
+    break_after_period: '2',
+    lunch_duration: '45',
+    lunch_after_period: '3'
+  } as Record<string, string>;
+
+  for (const [key, value] of Object.entries(defaults)) {
+    await pool.query(
+      'INSERT INTO cg_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING',
+      [key, value]
+    );
+  }
 
   for (const dept of departmentsToSeed) {
-    let deptId;
-    const existing = checkDept.get(dept.name) as { id: number } | undefined;
-    
-    if (!existing) {
-      const info = insertDept.run(dept.name, dept.type);
-      deptId = info.lastInsertRowid;
-      
-      // Add HOD
-      insertStaff.run(`Dr. HOD ${dept.name}`, "HOD", deptId, 12);
-      
-      // Add Staff
-      for (let i = 1; i <= 4; i++) {
-        insertStaff.run(`Prof. ${dept.name} Staff ${i}`, "Staff", deptId, 18);
-      }
-      
-      // Add Classes
-      for (let y = 1; y <= dept.years; y++) {
-        insertClass.run(`${y} ${dept.name}`, deptId, y, y * 2 - 1); // Odd semester for now
-      }
+    const deptInsert = await pool.query(
+      'INSERT INTO cg_departments (name, type) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id',
+      [dept.name, dept.type]
+    );
+    const deptId = deptInsert.rows[0].id as number;
+
+    await pool.query(
+      `INSERT INTO cg_staff (name, role, dept_id, max_workload)
+       VALUES ($1, 'HOD', $2, 12)
+       ON CONFLICT DO NOTHING`,
+      [`Dr. HOD ${dept.name}`, deptId]
+    );
+
+    for (let i = 1; i <= 4; i++) {
+      await pool.query(
+        `INSERT INTO cg_staff (name, role, dept_id, max_workload)
+         VALUES ($1, 'Staff', $2, 18)
+         ON CONFLICT DO NOTHING`,
+        [`Prof. ${dept.name} Staff ${i}`, deptId]
+      );
+    }
+
+    for (let y = 1; y <= dept.years; y++) {
+      await pool.query(
+        `INSERT INTO cg_classes (name, dept_id, year, semester)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (name) DO NOTHING`,
+        [`${y} ${dept.name}`, deptId, y, y * 2 - 1]
+      );
     }
   }
-};
+}
 
-seedData();
+async function inTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
 
 async function startServer() {
+  if (!process.env.SUPABASE_DB_URL && !process.env.DATABASE_URL) {
+    throw new Error('Missing SUPABASE_DB_URL or DATABASE_URL in .env');
+  }
+
+  await ensureSchema();
+  await seedDefaults();
+
   const app = express();
   app.use(express.json());
   const PORT = 3000;
 
-  // API Routes
-  app.get("/api/settings", (req, res) => {
-    const settings = db.prepare("SELECT * FROM settings").all();
-    const settingsMap = settings.reduce((acc: any, curr: any) => {
-      acc[curr.key] = curr.value;
-      return acc;
-    }, {});
-    res.json(settingsMap);
-  });
-
-  app.post("/api/settings", (req, res) => {
-    const updates = req.body;
-    const stmt = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
-    const transaction = db.transaction((data) => {
-      for (const [key, value] of Object.entries(data)) {
-        stmt.run(key, String(value));
-      }
-    });
-    transaction(updates);
-    res.json({ success: true });
-  });
-
-  app.get("/api/departments", (req, res) => {
-    const departments = db.prepare("SELECT * FROM departments").all();
-    res.json(departments);
-  });
-
-  app.post("/api/departments", (req, res) => {
-    const { name, type } = req.body;
-    const stmt = db.prepare("INSERT INTO departments (name, type) VALUES (?, ?)");
-    const info = stmt.run(name, type);
-    res.json({ id: info.lastInsertRowid });
-  });
-
-  app.delete("/api/departments/:id", (req, res) => {
+  app.get('/api/settings', async (req, res) => {
     try {
-      const deptId = Number(req.params.id);
-      const existing = db.prepare("SELECT * FROM departments WHERE id = ?").get(deptId);
-      if (!existing) {
-        return res.status(404).json({ error: "Department not found" });
-      }
-
-      const transaction = db.transaction(() => {
-        const deptClasses = db.prepare("SELECT id FROM classes WHERE dept_id = ?").all(deptId) as { id: number }[];
-        const classIds = deptClasses.map(c => c.id);
-
-        if (classIds.length > 0) {
-          const placeholders = classIds.map(() => "?").join(",");
-          db.prepare(`DELETE FROM timetable_slots WHERE class_id IN (${placeholders})`).run(...classIds);
-          db.prepare(`DELETE FROM class_subjects WHERE class_id IN (${placeholders})`).run(...classIds);
-          db.prepare(`DELETE FROM lab_requirements WHERE class_id IN (${placeholders})`).run(...classIds);
-          db.prepare(`DELETE FROM placement_classes WHERE class_id IN (${placeholders})`).run(...classIds);
-          db.prepare(`DELETE FROM classes WHERE id IN (${placeholders})`).run(...classIds);
-        }
-
-        db.prepare("UPDATE staff SET dept_id = NULL WHERE dept_id = ?").run(deptId);
-        db.prepare("UPDATE subjects SET dept_id = NULL WHERE dept_id = ?").run(deptId);
-        db.prepare("DELETE FROM departments WHERE id = ?").run(deptId);
-      });
-
-      transaction();
-      res.json({ success: true });
+      const { rows } = await pool.query('SELECT key, value FROM cg_settings');
+      const map = rows.reduce((acc: Record<string, string>, row: { key: string; value: string }) => {
+        acc[row.key] = row.value;
+        return acc;
+      }, {});
+      res.json(map);
     } catch (e: any) {
-      res.status(400).json({ error: e.message });
+      res.status(500).json({ error: e.message });
     }
   });
 
-  app.get("/api/staff", (req, res) => {
-    const staff = db.prepare(`
-      SELECT s.*, d.name as dept_name,
-             COALESCE((SELECT SUM(hours_per_week) FROM class_subjects WHERE staff_id = s.id), 0) as current_workload
-      FROM staff s 
-      LEFT JOIN departments d ON s.dept_id = d.id
-    `).all();
-    res.json(staff);
-  });
-
-  app.post("/api/staff", (req, res) => {
-    const { name, role, dept_id, max_workload } = req.body;
-    const stmt = db.prepare("INSERT INTO staff (name, role, dept_id, max_workload) VALUES (?, ?, ?, ?)");
-    const info = stmt.run(name, role, dept_id, max_workload);
-    res.json({ id: info.lastInsertRowid });
-  });
-
-  app.get("/api/subjects", (req, res) => {
-    const subjects = db.prepare("SELECT * FROM subjects").all();
-    res.json(subjects);
-  });
-
-  app.post("/api/subjects", (req, res) => {
+  app.post('/api/settings', async (req, res) => {
     try {
-      const { name, code, type, dept_id, is_addon } = req.body;
-      const normalizedDeptId = dept_id ? Number(dept_id) : null;
-      const stmt = db.prepare("INSERT INTO subjects (name, code, type, dept_id, is_addon) VALUES (?, ?, ?, ?, ?)");
-      const info = stmt.run(name?.trim(), code?.trim(), type, normalizedDeptId, is_addon ? 1 : 0);
-      const subject = db.prepare("SELECT * FROM subjects WHERE id = ?").get(info.lastInsertRowid);
-      res.json(subject);
-    } catch (e: any) {
-      res.status(400).json({ error: e.message });
-    }
-  });
-
-  app.delete("/api/subjects/:id", (req, res) => {
-    try {
-      const subjectId = Number(req.params.id);
-      const existing = db.prepare("SELECT * FROM subjects WHERE id = ?").get(subjectId);
-      if (!existing) {
-        return res.status(404).json({ error: "Subject not found" });
-      }
-
-      const transaction = db.transaction(() => {
-        db.prepare("DELETE FROM timetable_slots WHERE subject_id = ?").run(subjectId);
-        db.prepare("DELETE FROM class_subjects WHERE subject_id = ?").run(subjectId);
-        db.prepare("DELETE FROM lab_requirements WHERE subject_id = ?").run(subjectId);
-        db.prepare("DELETE FROM subjects WHERE id = ?").run(subjectId);
-      });
-
-      transaction();
-      res.json({ success: true });
-    } catch (e: any) {
-      res.status(400).json({ error: e.message });
-    }
-  });
-
-  app.get("/api/classes", (req, res) => {
-    const classes = db.prepare(`
-      SELECT c.*, d.name as dept_name, tutor.name as tutor_name
-      FROM classes c 
-      JOIN departments d ON c.dept_id = d.id
-      LEFT JOIN staff tutor ON c.tutor_staff_id = tutor.id
-    `).all();
-    res.json(classes);
-  });
-
-  app.post("/api/classes", (req, res) => {
-    try {
-      const { name, dept_id, year, semester, student_strength, tutor_staff_id } = req.body;
-      const stmt = db.prepare(`
-        INSERT INTO classes (name, dept_id, year, semester, student_strength, tutor_staff_id)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `);
-      const info = stmt.run(
-        name?.trim(),
-        Number(dept_id),
-        Number(year),
-        Number(semester),
-        Number(student_strength) || 0,
-        tutor_staff_id ? Number(tutor_staff_id) : null
-      );
-      const createdClass = db.prepare(`
-        SELECT c.*, d.name as dept_name, tutor.name as tutor_name
-        FROM classes c
-        JOIN departments d ON c.dept_id = d.id
-        LEFT JOIN staff tutor ON c.tutor_staff_id = tutor.id
-        WHERE c.id = ?
-      `).get(info.lastInsertRowid);
-      res.json(createdClass);
-    } catch (e: any) {
-      res.status(400).json({ error: e.message });
-    }
-  });
-
-  app.patch("/api/classes/:id", (req, res) => {
-    try {
-      const classId = Number(req.params.id);
-      const existing = db.prepare("SELECT * FROM classes WHERE id = ?").get(classId) as any;
-      if (!existing) {
-        return res.status(404).json({ error: "Class not found" });
-      }
-
-      const studentStrength = req.body.student_strength ?? existing.student_strength;
-      const tutorStaffId = req.body.tutor_staff_id === undefined
-        ? existing.tutor_staff_id
-        : (req.body.tutor_staff_id ? Number(req.body.tutor_staff_id) : null);
-
-      db.prepare(`
-        UPDATE classes
-        SET student_strength = ?, tutor_staff_id = ?
-        WHERE id = ?
-      `).run(Number(studentStrength) || 0, tutorStaffId, classId);
-
-      const updatedClass = db.prepare(`
-        SELECT c.*, d.name as dept_name, tutor.name as tutor_name
-        FROM classes c
-        JOIN departments d ON c.dept_id = d.id
-        LEFT JOIN staff tutor ON c.tutor_staff_id = tutor.id
-        WHERE c.id = ?
-      `).get(classId);
-      res.json(updatedClass);
-    } catch (e: any) {
-      res.status(400).json({ error: e.message });
-    }
-  });
-
-  app.get("/api/classes/:id/subjects", (req, res) => {
-    const subjects = db.prepare(`
-      SELECT cs.*, s.name as subject_name, s.code as subject_code, st.name as staff_name
-      FROM class_subjects cs
-      JOIN subjects s ON cs.subject_id = s.id
-      LEFT JOIN staff st ON cs.staff_id = st.id
-      WHERE cs.class_id = ?
-    `).all(req.params.id);
-    res.json(subjects);
-  });
-
-  app.post("/api/classes/:id/subjects", (req, res) => {
-    const { subject_id, staff_id, hours_per_week, is_lab_required } = req.body;
-    const stmt = db.prepare("INSERT INTO class_subjects (class_id, subject_id, staff_id, hours_per_week, is_lab_required) VALUES (?, ?, ?, ?, ?)");
-    const info = stmt.run(req.params.id, subject_id, staff_id, hours_per_week, is_lab_required ? 1 : 0);
-    res.json({ id: info.lastInsertRowid });
-  });
-
-  // Bulk add subjects to a class
-  app.post("/api/classes/:id/subjects/bulk", (req, res) => {
-    try {
-      const { subjects } = req.body;
-      const classId = req.params.id;
-      
-      const transaction = db.transaction(() => {
-        const stmt = db.prepare("INSERT INTO class_subjects (class_id, subject_id, staff_id, hours_per_week, is_lab_required) VALUES (?, ?, ?, ?, ?)");
-        
-        for (const subject of subjects) {
-          stmt.run(
-            classId,
-            subject.subject_id,
-            subject.staff_id || null,
-            subject.hours_per_week || 3,
-            subject.is_lab_required ? 1 : 0
+      const updates = req.body as Record<string, any>;
+      await inTransaction(async client => {
+        for (const [key, value] of Object.entries(updates)) {
+          await client.query(
+            `INSERT INTO cg_settings (key, value) VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+            [key, String(value)]
           );
         }
       });
-      
-      transaction();
       res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
   });
 
-  // Create subject and assign to class
-  app.post("/api/subjects-and-assign", (req, res) => {
+  app.get('/api/departments', async (req, res) => {
+    try {
+      const { rows } = await pool.query('SELECT * FROM cg_departments ORDER BY name');
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/departments', async (req, res) => {
+    try {
+      const { name, type } = req.body;
+      const { rows } = await pool.query(
+        'INSERT INTO cg_departments (name, type) VALUES ($1, $2) RETURNING id',
+        [name, type]
+      );
+      res.json({ id: rows[0].id });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.delete('/api/departments/:id', async (req, res) => {
+    try {
+      const deptId = Number(req.params.id);
+      const existing = await pool.query('SELECT id FROM cg_departments WHERE id = $1', [deptId]);
+      if (existing.rowCount === 0) return res.status(404).json({ error: 'Department not found' });
+
+      await inTransaction(async client => {
+        const classes = await client.query('SELECT id FROM cg_classes WHERE dept_id = $1', [deptId]);
+        const ids = classes.rows.map((r: { id: number }) => r.id);
+        if (ids.length > 0) {
+          await client.query('DELETE FROM cg_timetable_slots WHERE class_id = ANY($1::int[])', [ids]);
+          await client.query('DELETE FROM cg_class_subjects WHERE class_id = ANY($1::int[])', [ids]);
+          await client.query('DELETE FROM cg_lab_requirements WHERE class_id = ANY($1::int[])', [ids]);
+          await client.query('DELETE FROM cg_placement_classes WHERE class_id = ANY($1::int[])', [ids]);
+          await client.query('DELETE FROM cg_classes WHERE id = ANY($1::int[])', [ids]);
+        }
+        await client.query('UPDATE cg_staff SET dept_id = NULL WHERE dept_id = $1', [deptId]);
+        await client.query('UPDATE cg_subjects SET dept_id = NULL WHERE dept_id = $1', [deptId]);
+        await client.query('DELETE FROM cg_departments WHERE id = $1', [deptId]);
+      });
+
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/staff', async (req, res) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT s.*, d.name AS dept_name,
+               COALESCE((SELECT SUM(hours_per_week) FROM cg_class_subjects WHERE staff_id = s.id), 0) AS current_workload
+        FROM cg_staff s
+        LEFT JOIN cg_departments d ON s.dept_id = d.id
+        ORDER BY s.name
+      `);
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/staff', async (req, res) => {
+    try {
+      const { name, role, dept_id, max_workload } = req.body;
+      const { rows } = await pool.query(
+        'INSERT INTO cg_staff (name, role, dept_id, max_workload) VALUES ($1, $2, $3, $4) RETURNING id',
+        [name, role, dept_id || null, max_workload]
+      );
+      res.json({ id: rows[0].id });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/subjects', async (req, res) => {
+    try {
+      const { rows } = await pool.query('SELECT * FROM cg_subjects ORDER BY name');
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/subjects', async (req, res) => {
+    try {
+      const { name, code, type, dept_id, is_addon } = req.body;
+      const { rows } = await pool.query(
+        `INSERT INTO cg_subjects (name, code, type, dept_id, is_addon)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING *`,
+        [name?.trim(), code?.trim(), type, dept_id ? Number(dept_id) : null, !!is_addon]
+      );
+      res.json(rows[0]);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.delete('/api/subjects/:id', async (req, res) => {
+    try {
+      const subjectId = Number(req.params.id);
+      const existing = await pool.query('SELECT id FROM cg_subjects WHERE id = $1', [subjectId]);
+      if (existing.rowCount === 0) return res.status(404).json({ error: 'Subject not found' });
+
+      await inTransaction(async client => {
+        await client.query('DELETE FROM cg_timetable_slots WHERE subject_id = $1', [subjectId]);
+        await client.query('DELETE FROM cg_class_subjects WHERE subject_id = $1', [subjectId]);
+        await client.query('DELETE FROM cg_lab_requirements WHERE subject_id = $1', [subjectId]);
+        await client.query('DELETE FROM cg_subjects WHERE id = $1', [subjectId]);
+      });
+
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/classes', async (req, res) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT c.*, d.name AS dept_name, t.name AS tutor_name
+        FROM cg_classes c
+        JOIN cg_departments d ON c.dept_id = d.id
+        LEFT JOIN cg_staff t ON c.tutor_staff_id = t.id
+        ORDER BY c.name
+      `);
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/classes', async (req, res) => {
+    try {
+      const { name, dept_id, year, semester, student_strength, tutor_staff_id } = req.body;
+      const { rows } = await pool.query(
+        `INSERT INTO cg_classes (name, dept_id, year, semester, student_strength, tutor_staff_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id`,
+        [
+          name?.trim(),
+          Number(dept_id),
+          Number(year),
+          Number(semester),
+          Number(student_strength) || 0,
+          tutor_staff_id ? Number(tutor_staff_id) : null
+        ]
+      );
+      const classId = rows[0].id;
+      const result = await pool.query(
+        `SELECT c.*, d.name AS dept_name, t.name AS tutor_name
+         FROM cg_classes c
+         JOIN cg_departments d ON c.dept_id = d.id
+         LEFT JOIN cg_staff t ON c.tutor_staff_id = t.id
+         WHERE c.id = $1`,
+        [classId]
+      );
+      res.json(result.rows[0]);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.patch('/api/classes/:id', async (req, res) => {
+    try {
+      const classId = Number(req.params.id);
+      const existing = await pool.query('SELECT * FROM cg_classes WHERE id = $1', [classId]);
+      if (existing.rowCount === 0) return res.status(404).json({ error: 'Class not found' });
+      const current = existing.rows[0];
+
+      const studentStrength = req.body.student_strength ?? current.student_strength;
+      const tutorStaffId = req.body.tutor_staff_id === undefined
+        ? current.tutor_staff_id
+        : (req.body.tutor_staff_id ? Number(req.body.tutor_staff_id) : null);
+
+      await pool.query(
+        'UPDATE cg_classes SET student_strength = $1, tutor_staff_id = $2 WHERE id = $3',
+        [Number(studentStrength) || 0, tutorStaffId, classId]
+      );
+
+      const updated = await pool.query(
+        `SELECT c.*, d.name AS dept_name, t.name AS tutor_name
+         FROM cg_classes c
+         JOIN cg_departments d ON c.dept_id = d.id
+         LEFT JOIN cg_staff t ON c.tutor_staff_id = t.id
+         WHERE c.id = $1`,
+        [classId]
+      );
+      res.json(updated.rows[0]);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/classes/:id/subjects', async (req, res) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT cs.*, s.name AS subject_name, s.code AS subject_code, st.name AS staff_name
+        FROM cg_class_subjects cs
+        JOIN cg_subjects s ON cs.subject_id = s.id
+        LEFT JOIN cg_staff st ON cs.staff_id = st.id
+        WHERE cs.class_id = $1
+        ORDER BY s.name
+      `, [Number(req.params.id)]);
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/classes/:id/subjects', async (req, res) => {
+    try {
+      const classId = Number(req.params.id);
+      const { subject_id, staff_id, hours_per_week, is_lab_required } = req.body;
+      const { rows } = await pool.query(
+        `INSERT INTO cg_class_subjects (class_id, subject_id, staff_id, hours_per_week, is_lab_required)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (class_id, subject_id) DO UPDATE
+         SET staff_id = EXCLUDED.staff_id,
+             hours_per_week = EXCLUDED.hours_per_week,
+             is_lab_required = EXCLUDED.is_lab_required
+         RETURNING id`,
+        [classId, Number(subject_id), staff_id ? Number(staff_id) : null, Number(hours_per_week), !!is_lab_required]
+      );
+      res.json({ id: rows[0].id });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/classes/:id/subjects/bulk', async (req, res) => {
+    try {
+      const classId = Number(req.params.id);
+      const subjects = req.body.subjects as any[];
+      await inTransaction(async client => {
+        for (const subject of subjects) {
+          await client.query(
+            `INSERT INTO cg_class_subjects (class_id, subject_id, staff_id, hours_per_week, is_lab_required)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (class_id, subject_id) DO NOTHING`,
+            [
+              classId,
+              Number(subject.subject_id),
+              subject.staff_id ? Number(subject.staff_id) : null,
+              Number(subject.hours_per_week || 3),
+              !!subject.is_lab_required
+            ]
+          );
+        }
+      });
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/subjects-and-assign', async (req, res) => {
     try {
       const { name, code, type, dept_id, class_id, staff_id, hours_per_week, is_lab_required } = req.body;
-      
-      const transaction = db.transaction(() => {
-        // Create the subject
-        const subjectStmt = db.prepare("INSERT INTO subjects (name, code, type, dept_id, is_addon) VALUES (?, ?, ?, ?, ?)");
-        const subjectInfo = subjectStmt.run(
-          name?.trim(),
-          code?.trim(),
-          type,
-          dept_id ? Number(dept_id) : null,
-          0
+      const subject = await inTransaction(async client => {
+        const created = await client.query(
+          `INSERT INTO cg_subjects (name, code, type, dept_id, is_addon)
+           VALUES ($1, $2, $3, $4, FALSE)
+           RETURNING *`,
+          [name?.trim(), code?.trim(), type, dept_id ? Number(dept_id) : null]
         );
-        const subjectId = subjectInfo.lastInsertRowid;
-        
-        // Assign to class
-        const assignStmt = db.prepare("INSERT INTO class_subjects (class_id, subject_id, staff_id, hours_per_week, is_lab_required) VALUES (?, ?, ?, ?, ?)");
-        assignStmt.run(
-          class_id,
-          subjectId,
-          staff_id || null,
-          hours_per_week || 3,
-          is_lab_required ? 1 : 0
+        const subjectId = created.rows[0].id;
+
+        await client.query(
+          `INSERT INTO cg_class_subjects (class_id, subject_id, staff_id, hours_per_week, is_lab_required)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (class_id, subject_id) DO NOTHING`,
+          [Number(class_id), subjectId, staff_id ? Number(staff_id) : null, Number(hours_per_week || 3), !!is_lab_required]
         );
-        
-        return subjectId;
+
+        return created.rows[0];
       });
-      
-      const subjectId = transaction();
-      const subject = db.prepare("SELECT * FROM subjects WHERE id = ?").get(subjectId);
+
       res.json(subject);
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
   });
 
-  // Update class subject
-  app.patch("/api/classes/:classId/subjects/:classSubjectId", (req, res) => {
+  app.patch('/api/classes/:classId/subjects/:classSubjectId', async (req, res) => {
     try {
+      const classId = Number(req.params.classId);
+      const classSubjectId = Number(req.params.classSubjectId);
       const { staff_id, hours_per_week, is_lab_required } = req.body;
-      const { classId, classSubjectId } = req.params;
-      
-      // Verify the class subject exists
-      const existing = db.prepare("SELECT * FROM class_subjects WHERE id = ? AND class_id = ?").get(classSubjectId, classId) as any;
-      if (!existing) {
-        return res.status(404).json({ error: "Class subject not found" });
-      }
-      
-      const updatedHours = hours_per_week !== undefined ? hours_per_week : existing.hours_per_week;
-      const updatedStaff = staff_id !== undefined ? (staff_id || null) : existing.staff_id;
-      const updatedLab = is_lab_required !== undefined ? (is_lab_required ? 1 : 0) : existing.is_lab_required;
-      
-      db.prepare(`
-        UPDATE class_subjects
-        SET staff_id = ?, hours_per_week = ?, is_lab_required = ?
-        WHERE id = ?
-      `).run(updatedStaff, updatedHours, updatedLab, classSubjectId);
-      
-      const updated = db.prepare(`
-        SELECT cs.*, s.name as subject_name, s.code as subject_code, st.name as staff_name
-        FROM class_subjects cs
-        JOIN subjects s ON cs.subject_id = s.id
-        LEFT JOIN staff st ON cs.staff_id = st.id
-        WHERE cs.id = ?
-      `).get(classSubjectId);
-      
-      res.json(updated);
+
+      const existing = await pool.query(
+        'SELECT * FROM cg_class_subjects WHERE id = $1 AND class_id = $2',
+        [classSubjectId, classId]
+      );
+      if (existing.rowCount === 0) return res.status(404).json({ error: 'Class subject not found' });
+      const current = existing.rows[0];
+
+      const updatedHours = hours_per_week !== undefined ? Number(hours_per_week) : current.hours_per_week;
+      const updatedStaff = staff_id !== undefined ? (staff_id ? Number(staff_id) : null) : current.staff_id;
+      const updatedLab = is_lab_required !== undefined ? !!is_lab_required : current.is_lab_required;
+
+      await pool.query(
+        `UPDATE cg_class_subjects
+         SET staff_id = $1, hours_per_week = $2, is_lab_required = $3
+         WHERE id = $4`,
+        [updatedStaff, updatedHours, updatedLab, classSubjectId]
+      );
+
+      const updated = await pool.query(`
+        SELECT cs.*, s.name AS subject_name, s.code AS subject_code, st.name AS staff_name
+        FROM cg_class_subjects cs
+        JOIN cg_subjects s ON cs.subject_id = s.id
+        LEFT JOIN cg_staff st ON cs.staff_id = st.id
+        WHERE cs.id = $1
+      `, [classSubjectId]);
+
+      res.json(updated.rows[0]);
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
   });
 
-  // Delete class subject
-  app.delete("/api/classes/:classId/subjects/:classSubjectId", (req, res) => {
+  app.delete('/api/classes/:classId/subjects/:classSubjectId', async (req, res) => {
     try {
-      const { classId, classSubjectId } = req.params;
-      
-      // Verify the class subject exists
-      const existing = db.prepare("SELECT * FROM class_subjects WHERE id = ? AND class_id = ?").get(classSubjectId, classId);
-      if (!existing) {
-        return res.status(404).json({ error: "Class subject not found" });
-      }
-      
-      // Delete the class subject
-      db.prepare("DELETE FROM class_subjects WHERE id = ?").run(classSubjectId);
-      
+      const classId = Number(req.params.classId);
+      const classSubjectId = Number(req.params.classSubjectId);
+      const existing = await pool.query(
+        'SELECT id FROM cg_class_subjects WHERE id = $1 AND class_id = $2',
+        [classSubjectId, classId]
+      );
+      if (existing.rowCount === 0) return res.status(404).json({ error: 'Class subject not found' });
+
+      await pool.query('DELETE FROM cg_class_subjects WHERE id = $1', [classSubjectId]);
       res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
   });
 
-  app.get("/api/labs", (req, res) => {
-    const labs = db.prepare("SELECT * FROM labs").all();
-    res.json(labs);
+  app.get('/api/labs', async (req, res) => {
+    try {
+      const { rows } = await pool.query('SELECT * FROM cg_labs ORDER BY name');
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
-  app.post("/api/labs", (req, res) => {
-    const { name, dept_id, systems_count } = req.body;
-    const stmt = db.prepare("INSERT INTO labs (name, dept_id, systems_count) VALUES (?, ?, ?)");
-    const info = stmt.run(name, dept_id, systems_count);
-    res.json({ id: info.lastInsertRowid });
+  app.post('/api/labs', async (req, res) => {
+    try {
+      const { name, dept_id, systems_count } = req.body;
+      const { rows } = await pool.query(
+        'INSERT INTO cg_labs (name, dept_id, systems_count) VALUES ($1, $2, $3) RETURNING id',
+        [name, dept_id ? Number(dept_id) : null, Number(systems_count)]
+      );
+      res.json({ id: rows[0].id });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
   });
 
-  app.delete("/api/labs/:id", (req, res) => {
+  app.delete('/api/labs/:id', async (req, res) => {
     try {
       const labId = Number(req.params.id);
-      const existing = db.prepare("SELECT * FROM labs WHERE id = ?").get(labId);
+      const existing = await pool.query('SELECT id FROM cg_labs WHERE id = $1', [labId]);
+      if (existing.rowCount === 0) return res.status(404).json({ error: 'Lab not found' });
 
-      if (!existing) {
-        return res.status(404).json({ error: "Lab not found" });
+      const usage = await pool.query('SELECT COUNT(*)::int AS count FROM cg_timetable_slots WHERE lab_id = $1', [labId]);
+      if ((usage.rows[0].count as number) > 0) {
+        return res.status(400).json({ error: 'This lab is already used in the timetable and cannot be deleted.' });
       }
 
-      const usage = db.prepare("SELECT COUNT(*) as count FROM timetable_slots WHERE lab_id = ?").get(labId) as { count: number };
-      if (usage.count > 0) {
-        return res.status(400).json({ error: "This lab is already used in the timetable and cannot be deleted." });
-      }
-
-      db.prepare("DELETE FROM labs WHERE id = ?").run(labId);
+      await pool.query('DELETE FROM cg_labs WHERE id = $1', [labId]);
       res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
   });
 
-  app.get("/api/timetable/:classId", (req, res) => {
-    const slots = db.prepare(`
-      SELECT ts.*, s.name as subject_name, s.code as subject_code, st.name as staff_name, l.name as lab_name
-      FROM timetable_slots ts
-      LEFT JOIN subjects s ON ts.subject_id = s.id
-      LEFT JOIN staff st ON ts.staff_id = st.id
-      LEFT JOIN labs l ON ts.lab_id = l.id
-      WHERE ts.class_id = ?
-    `).all(req.params.classId);
-    res.json(slots);
+  app.get('/api/timetable/:classId', async (req, res) => {
+    try {
+      const classId = Number(req.params.classId);
+      const { rows } = await pool.query(`
+        SELECT ts.*, s.name AS subject_name, s.code AS subject_code, st.name AS staff_name, l.name AS lab_name
+        FROM cg_timetable_slots ts
+        LEFT JOIN cg_subjects s ON ts.subject_id = s.id
+        LEFT JOIN cg_staff st ON ts.staff_id = st.id
+        LEFT JOIN cg_labs l ON ts.lab_id = l.id
+        WHERE ts.class_id = $1
+      `, [classId]);
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
-  app.post("/api/timetable/assign", (req, res) => {
-    const { class_id, day_order, period, subject_id, staff_id, lab_id, type, is_locked } = req.body;
-    
-    // Check for clashes
-    if (staff_id) {
-      const clash = db.prepare(`
-        SELECT * FROM timetable_slots 
-        WHERE staff_id = ? AND day_order = ? AND period = ? AND class_id != ?
-      `).get(staff_id, day_order, period, class_id);
-      if (clash) return res.status(400).json({ error: "Staff already assigned to another class at this time" });
-    }
-
-    if (lab_id) {
-      const labClash = db.prepare(`
-        SELECT * FROM timetable_slots 
-        WHERE lab_id = ? AND day_order = ? AND period = ? AND class_id != ?
-      `).get(lab_id, day_order, period, class_id);
-      if (labClash) return res.status(400).json({ error: "Lab already occupied at this time" });
-    }
-
-    const stmt = db.prepare(`
-      INSERT INTO timetable_slots (class_id, day_order, period, subject_id, staff_id, lab_id, type, is_locked)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(class_id, day_order, period) DO UPDATE SET
-        subject_id = excluded.subject_id,
-        staff_id = excluded.staff_id,
-        lab_id = excluded.lab_id,
-        type = excluded.type,
-        is_locked = excluded.is_locked
-    `);
-    // Note: SQLite doesn't have native ON CONFLICT for non-unique constraints without UNIQUE index.
-    // I'll add a UNIQUE index for (class_id, day_order, period)
-    
+  app.post('/api/timetable/assign', async (req, res) => {
     try {
-      const info = db.prepare(`
-        INSERT OR REPLACE INTO timetable_slots (class_id, day_order, period, subject_id, staff_id, lab_id, type, is_locked)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(class_id, day_order, period, subject_id, staff_id, lab_id, type, is_locked ? 1 : 0);
+      const { class_id, day_order, period, subject_id, staff_id, lab_id, type, is_locked } = req.body;
+
+      if (staff_id) {
+        const clash = await pool.query(
+          `SELECT id FROM cg_timetable_slots
+           WHERE staff_id = $1 AND day_order = $2 AND period = $3 AND class_id != $4
+           LIMIT 1`,
+          [Number(staff_id), Number(day_order), Number(period), Number(class_id)]
+        );
+        if (clash.rowCount) return res.status(400).json({ error: 'Staff already assigned to another class at this time' });
+      }
+
+      if (lab_id) {
+        const labClash = await pool.query(
+          `SELECT id FROM cg_timetable_slots
+           WHERE lab_id = $1 AND day_order = $2 AND period = $3 AND class_id != $4
+           LIMIT 1`,
+          [Number(lab_id), Number(day_order), Number(period), Number(class_id)]
+        );
+        if (labClash.rowCount) return res.status(400).json({ error: 'Lab already occupied at this time' });
+      }
+
+      await pool.query(
+        `INSERT INTO cg_timetable_slots (class_id, day_order, period, subject_id, staff_id, lab_id, type, is_locked)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (class_id, day_order, period) DO UPDATE
+         SET subject_id = EXCLUDED.subject_id,
+             staff_id = EXCLUDED.staff_id,
+             lab_id = EXCLUDED.lab_id,
+             type = EXCLUDED.type,
+             is_locked = EXCLUDED.is_locked`,
+        [
+          Number(class_id),
+          Number(day_order),
+          Number(period),
+          subject_id ? Number(subject_id) : null,
+          staff_id ? Number(staff_id) : null,
+          lab_id ? Number(lab_id) : null,
+          type ?? null,
+          !!is_locked
+        ]
+      );
+
       res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
 
-  app.get("/api/placement/blocks", (req, res) => {
-    const blocks = db.prepare("SELECT * FROM placement_blocks").all();
-    const result = blocks.map((b: any) => {
-      const classes = db.prepare(`
-        SELECT c.* FROM classes c
-        JOIN placement_classes pc ON c.id = pc.class_id
-        WHERE pc.placement_id = ?
-      `).all(b.id);
-      return { ...b, classes };
-    });
-    res.json(result);
+  app.get('/api/placement/blocks', async (req, res) => {
+    try {
+      const blocks = await pool.query('SELECT * FROM cg_placement_blocks ORDER BY id DESC');
+      const result = [] as any[];
+      for (const block of blocks.rows) {
+        const classes = await pool.query(
+          `SELECT c.* FROM cg_classes c
+           JOIN cg_placement_classes pc ON c.id = pc.class_id
+           WHERE pc.placement_id = $1`,
+          [block.id]
+        );
+        result.push({ ...block, classes: classes.rows });
+      }
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
-  app.post("/api/placement/blocks", (req, res) => {
-    const { name, hours, class_ids } = req.body;
-    
-    const transaction = db.transaction(() => {
-      const stmt = db.prepare("INSERT INTO placement_blocks (name, hours) VALUES (?, ?)");
-      const info = stmt.run(name, hours);
-      const blockId = info.lastInsertRowid;
+  app.post('/api/placement/blocks', async (req, res) => {
+    try {
+      const { name, hours, class_ids } = req.body as { name: string; hours: number; class_ids: number[] };
 
-      const insertClass = db.prepare("INSERT INTO placement_classes (placement_id, class_id) VALUES (?, ?)");
-      for (const classId of class_ids) {
-        insertClass.run(blockId, classId);
-      }
+      const blockId = await inTransaction(async client => {
+        const block = await client.query(
+          'INSERT INTO cg_placement_blocks (name, hours) VALUES ($1, $2) RETURNING id',
+          [name, Number(hours)]
+        );
+        const placementId = block.rows[0].id as number;
 
-      // Algorithm to find slots:
-      // We look for 'hours' consecutive free periods on any day for ALL classes in the block.
-      const periodsPerDay = parseInt((db.prepare("SELECT value FROM settings WHERE key = 'periods_per_day'").get() as any).value);
-      let assigned = false;
+        for (const classId of class_ids) {
+          await client.query(
+            'INSERT INTO cg_placement_classes (placement_id, class_id) VALUES ($1, $2)',
+            [placementId, Number(classId)]
+          );
+        }
 
-      for (let day = 1; day <= 6; day++) {
-        for (let startP = 1; startP <= periodsPerDay - hours + 1; startP++) {
-          // Check if ALL classes are free for ALL periods in this block
-          let allFree = true;
-          for (const classId of class_ids) {
-            const occupied = db.prepare(`
-              SELECT 1 FROM timetable_slots 
-              WHERE class_id = ? AND day_order = ? AND period >= ? AND period < ?
-            `).get(classId, day, startP, startP + hours);
-            
-            if (occupied) {
-              allFree = false;
-              break;
-            }
-          }
+        const settingsRows = await client.query('SELECT key, value FROM cg_settings');
+        const settings = settingsRows.rows.reduce((acc: Record<string, string>, row: { key: string; value: string }) => {
+          acc[row.key] = row.value;
+          return acc;
+        }, {});
+        const periodsPerDay = Number(settings.periods_per_day || 6);
 
-          if (allFree) {
-            // Assign!
-            const assignStmt = db.prepare(`
-              INSERT INTO timetable_slots (class_id, day_order, period, type, is_locked)
-              VALUES (?, ?, ?, 'placement', 1)
-            `);
+        let assigned = false;
+        for (let day = 1; day <= 6 && !assigned; day++) {
+          for (let startP = 1; startP <= periodsPerDay - Number(hours) + 1 && !assigned; startP++) {
+            let allFree = true;
             for (const classId of class_ids) {
-              for (let p = startP; p < startP + hours; p++) {
-                assignStmt.run(classId, day, p);
+              const occupied = await client.query(
+                `SELECT 1 FROM cg_timetable_slots
+                 WHERE class_id = $1 AND day_order = $2 AND period >= $3 AND period < $4
+                 LIMIT 1`,
+                [Number(classId), day, startP, startP + Number(hours)]
+              );
+              if (occupied.rowCount) {
+                allFree = false;
+                break;
               }
             }
-            assigned = true;
-            break;
+
+            if (allFree) {
+              for (const classId of class_ids) {
+                for (let p = startP; p < startP + Number(hours); p++) {
+                  await client.query(
+                    `INSERT INTO cg_timetable_slots (class_id, day_order, period, type, is_locked)
+                     VALUES ($1, $2, $3, 'placement', TRUE)
+                     ON CONFLICT (class_id, day_order, period) DO UPDATE
+                     SET type = EXCLUDED.type, is_locked = EXCLUDED.is_locked`,
+                    [Number(classId), day, p]
+                  );
+                }
+              }
+              assigned = true;
+            }
           }
         }
-        if (assigned) break;
-      }
 
-      if (!assigned) {
-        throw new Error("Could not find a suitable time slot for this placement block across all selected classes.");
-      }
+        if (!assigned) throw new Error('Could not find a suitable time slot for this placement block across all selected classes.');
+        return placementId;
+      });
 
-      return blockId;
-    });
-
-    try {
-      const id = transaction();
-      res.json({ id });
+      res.json({ id: blockId });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
   });
 
-  app.delete("/api/placement/blocks/:id", (req, res) => {
-    const blockId = req.params.id;
-    
-    const transaction = db.transaction(() => {
-      // Get classes associated with this block
-      const classes = db.prepare("SELECT class_id FROM placement_classes WHERE placement_id = ?").all(blockId) as { class_id: number }[];
-      
-      // Remove from timetable_slots (only 'placement' type for these classes)
-      const deleteSlots = db.prepare(`
-        DELETE FROM timetable_slots 
-        WHERE class_id = ? AND type = 'placement'
-      `);
-      
-      for (const c of classes) {
-        deleteSlots.run(c.class_id);
-      }
-
-      db.prepare("DELETE FROM placement_classes WHERE placement_id = ?").run(blockId);
-      db.prepare("DELETE FROM placement_blocks WHERE id = ?").run(blockId);
-    });
-
-    transaction();
-    res.json({ success: true });
+  app.delete('/api/placement/blocks/:id', async (req, res) => {
+    try {
+      const blockId = Number(req.params.id);
+      await inTransaction(async client => {
+        const classes = await client.query('SELECT class_id FROM cg_placement_classes WHERE placement_id = $1', [blockId]);
+        for (const c of classes.rows) {
+          await client.query("DELETE FROM cg_timetable_slots WHERE class_id = $1 AND type = 'placement'", [c.class_id]);
+        }
+        await client.query('DELETE FROM cg_placement_classes WHERE placement_id = $1', [blockId]);
+        await client.query('DELETE FROM cg_placement_blocks WHERE id = $1', [blockId]);
+      });
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
   });
 
-  app.delete("/api/placement/blocks/:id/classes/:classId", (req, res) => {
-    const { id: blockId, classId } = req.params;
-    
+  app.delete('/api/placement/blocks/:id/classes/:classId', async (req, res) => {
     try {
-      const transaction = db.transaction(() => {
-        // Remove from timetable_slots for this class
-        db.prepare(`
-          DELETE FROM timetable_slots 
-          WHERE class_id = ? AND type = 'placement'
-        `).run(classId);
+      const blockId = Number(req.params.id);
+      const classId = Number(req.params.classId);
 
-        // Remove from placement_classes
-        db.prepare(`
-          DELETE FROM placement_classes 
-          WHERE placement_id = ? AND class_id = ?
-        `).run(blockId, classId);
+      await inTransaction(async client => {
+        await client.query("DELETE FROM cg_timetable_slots WHERE class_id = $1 AND type = 'placement'", [classId]);
+        await client.query('DELETE FROM cg_placement_classes WHERE placement_id = $1 AND class_id = $2', [blockId, classId]);
 
-        // If no classes left in block, delete the block
-        const remaining = db.prepare("SELECT COUNT(*) as count FROM placement_classes WHERE placement_id = ?").get(blockId) as { count: number };
-        if (remaining.count === 0) {
-          db.prepare("DELETE FROM placement_blocks WHERE id = ?").run(blockId);
+        const remain = await client.query('SELECT COUNT(*)::int AS count FROM cg_placement_classes WHERE placement_id = $1', [blockId]);
+        if ((remain.rows[0].count as number) === 0) {
+          await client.query('DELETE FROM cg_placement_blocks WHERE id = $1', [blockId]);
         }
       });
 
-      transaction();
       res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
   });
 
-  app.patch("/api/timetable/move-slot", (req, res) => {
-    const { class_id, from_day, from_period, to_day, to_period } = req.body;
-    
+  app.patch('/api/timetable/move-slot', async (req, res) => {
     try {
-      const transaction = db.transaction(() => {
-        // Get the slot at the source
-        const slot = db.prepare(`
-          SELECT * FROM timetable_slots 
-          WHERE class_id = ? AND day_order = ? AND period = ?
-        `).get(class_id, from_day, from_period) as any;
+      const { class_id, from_day, from_period, to_day, to_period } = req.body;
+      await inTransaction(async client => {
+        const slot = await client.query(
+          `SELECT * FROM cg_timetable_slots WHERE class_id = $1 AND day_order = $2 AND period = $3`,
+          [Number(class_id), Number(from_day), Number(from_period)]
+        );
+        if (slot.rowCount === 0) throw new Error('Source slot not found');
 
-        if (!slot) throw new Error("Source slot not found");
+        const occupied = await client.query(
+          `SELECT 1 FROM cg_timetable_slots WHERE class_id = $1 AND day_order = $2 AND period = $3`,
+          [Number(class_id), Number(to_day), Number(to_period)]
+        );
+        if (occupied.rowCount > 0) throw new Error('Destination slot is already occupied');
 
-        // Check if destination is occupied
-        const occupied = db.prepare(`
-          SELECT 1 FROM timetable_slots 
-          WHERE class_id = ? AND day_order = ? AND period = ?
-        `).get(class_id, to_day, to_period);
-
-        if (occupied) throw new Error("Destination slot is already occupied");
-
-        // If it's a placement slot, we might want to move the whole block, 
-        // but for now let's allow moving individual slots or handle them as individual units.
-        // The user asked to "adjust the slots".
-        
-        db.prepare(`
-          UPDATE timetable_slots 
-          SET day_order = ?, period = ?
-          WHERE id = ?
-        `).run(to_day, to_period, slot.id);
+        await client.query(
+          'UPDATE cg_timetable_slots SET day_order = $1, period = $2 WHERE id = $3',
+          [Number(to_day), Number(to_period), slot.rows[0].id]
+        );
       });
-
-      transaction();
       res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
   });
 
-  app.post("/api/timetable/generate", (req, res) => {
+  app.post('/api/timetable/generate', async (req, res) => {
     try {
-      const transaction = db.transaction(() => {
-        // Rebuild the generated timetable from the class-subject mappings stored in the database.
-        db.prepare("DELETE FROM timetable_slots WHERE type IS NULL OR type != 'placement'").run();
+      await inTransaction(async client => {
+        await client.query("DELETE FROM cg_timetable_slots WHERE type IS NULL OR type != 'placement'");
 
-        const classes = db.prepare("SELECT * FROM classes").all() as any[];
-        const settings = db.prepare("SELECT * FROM settings").all() as any[];
-        const settingsMap = settings.reduce((acc, s) => ({ ...acc, [s.key]: s.value }), {} as any);
-        const periodsPerDay = parseInt(settingsMap.periods_per_day || "6");
+        const classes = await client.query('SELECT * FROM cg_classes');
+        const settingsRows = await client.query('SELECT key, value FROM cg_settings');
+        const settings = settingsRows.rows.reduce((acc: Record<string, string>, row: { key: string; value: string }) => {
+          acc[row.key] = row.value;
+          return acc;
+        }, {});
+
+        const periodsPerDay = Number(settings.periods_per_day || 6);
         const days = [1, 2, 3, 4, 5, 6];
 
-        for (const cls of classes) {
-          const classSubjects = db.prepare(`
-            SELECT cs.*, s.type as subject_type 
-            FROM class_subjects cs
-            JOIN subjects s ON cs.subject_id = s.id
-            WHERE cs.class_id = ?
-          `).all(cls.id) as any[];
+        for (const cls of classes.rows) {
+          const subjects = await client.query(
+            `SELECT cs.*, s.type AS subject_type
+             FROM cg_class_subjects cs
+             JOIN cg_subjects s ON cs.subject_id = s.id
+             WHERE cs.class_id = $1`,
+            [cls.id]
+          );
 
-          // Create a pool of hours to be scheduled
-          let pool: any[] = [];
-          for (const cs of classSubjects) {
-            for (let i = 0; i < cs.hours_per_week; i++) {
-              pool.push({
+          let poolItems: Array<{ subject_id: number; staff_id: number | null; type: string }> = [];
+          for (const cs of subjects.rows) {
+            for (let i = 0; i < Number(cs.hours_per_week); i++) {
+              poolItems.push({
                 subject_id: cs.subject_id,
                 staff_id: cs.staff_id,
                 type: cs.subject_type
@@ -808,62 +865,59 @@ async function startServer() {
             }
           }
 
-          // Shuffle pool for some randomness
-          pool = pool.sort(() => Math.random() - 0.5);
-
-          // Fill slots
+          poolItems = poolItems.sort(() => Math.random() - 0.5);
           let poolIndex = 0;
+
           for (const day of days) {
             for (let period = 1; period <= periodsPerDay; period++) {
-              if (poolIndex >= pool.length) break;
+              if (poolIndex >= poolItems.length) break;
+              const item = poolItems[poolIndex];
 
-              const item = pool[poolIndex];
-              
-              // Check if staff is available (not teaching another class at this time)
-              const staffBusy = item.staff_id ? db.prepare(`
-                SELECT 1 FROM timetable_slots 
-                WHERE staff_id = ? AND day_order = ? AND period = ?
-              `).get(item.staff_id, day, period) : null;
+              const staffBusy = item.staff_id
+                ? await client.query(
+                    'SELECT 1 FROM cg_timetable_slots WHERE staff_id = $1 AND day_order = $2 AND period = $3 LIMIT 1',
+                    [item.staff_id, day, period]
+                  )
+                : { rowCount: 0 };
 
-              if (!staffBusy) {
-                db.prepare(`
-                  INSERT INTO timetable_slots (class_id, day_order, period, subject_id, staff_id, type)
-                  VALUES (?, ?, ?, ?, ?, ?)
-                `).run(cls.id, day, period, item.subject_id, item.staff_id, item.type);
+              if (!staffBusy.rowCount) {
+                await client.query(
+                  `INSERT INTO cg_timetable_slots (class_id, day_order, period, subject_id, staff_id, type)
+                   VALUES ($1, $2, $3, $4, $5, $6)
+                   ON CONFLICT (class_id, day_order, period) DO NOTHING`,
+                  [cls.id, day, period, item.subject_id, item.staff_id, item.type]
+                );
                 poolIndex++;
               }
             }
-            if (poolIndex >= pool.length) break;
+            if (poolIndex >= poolItems.length) break;
           }
         }
       });
 
-      transaction();
-      res.json({ success: true, message: "Timetable generated successfully" });
+      res.json({ success: true, message: 'Timetable generated successfully' });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
 
-  app.post("/api/timetable/clear", (req, res) => {
+  app.post('/api/timetable/clear', async (req, res) => {
     try {
-      const transaction = db.transaction(() => {
-        db.prepare("DELETE FROM timetable_slots").run();
-        db.prepare("DELETE FROM placement_classes").run();
-        db.prepare("DELETE FROM placement_blocks").run();
+      await inTransaction(async client => {
+        await client.query('DELETE FROM cg_timetable_slots');
+        await client.query('DELETE FROM cg_placement_classes');
+        await client.query('DELETE FROM cg_placement_blocks');
       });
-      transaction();
-      res.json({ success: true, message: "All timetables cleared" });
+      res.json({ success: true, message: 'All timetables cleared' });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
-      appType: "spa",
+      appType: 'spa'
     });
     app.use(vite.middlewares);
   } else {
@@ -874,14 +928,12 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }
 
-// Add unique constraint to timetable_slots
-try {
-  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_timetable_unique ON timetable_slots (class_id, day_order, period)");
-} catch (e) {}
-
-startServer();
+startServer().catch(err => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
+});
