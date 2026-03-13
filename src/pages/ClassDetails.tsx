@@ -1,11 +1,28 @@
-import { useState, useEffect } from 'react';
-import { useParams } from 'react-router-dom';
-import { Class, ClassSubject, Subject, Staff, TimetableSlot, Settings } from '../types';
-import { Plus, BookOpen, User, Clock, FlaskConical, Lock, Unlock, Save } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { ArrowLeft, Clock, FlaskConical, Plus, X } from 'lucide-react';
 import { clsx } from 'clsx';
+import { Class, ClassSubject, Settings, Staff, Subject, TimetableSlot } from '../types';
+
+type CreateSubjectForm = {
+  name: string;
+  code: string;
+  type: 'core' | 'common' | 'lab';
+  staff_input: string;
+  hours_per_week: number;
+  is_lab_required: boolean;
+};
+
+type EditSubjectForm = {
+  staff_input: string;
+  hours_per_week: number;
+  is_lab_required: boolean;
+};
 
 export default function ClassDetails() {
   const { id } = useParams();
+  const navigate = useNavigate();
+
   const [cls, setCls] = useState<Class | null>(null);
   const [classSubjects, setClassSubjects] = useState<ClassSubject[]>([]);
   const [allSubjects, setAllSubjects] = useState<Subject[]>([]);
@@ -13,219 +30,677 @@ export default function ClassDetails() {
   const [timetable, setTimetable] = useState<TimetableSlot[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
 
-  const [newCS, setNewCS] = useState({ subject_id: '', staff_id: '', hours_per_week: 3, is_lab_required: false });
+  const [subjectInput, setSubjectInput] = useState('');
+  const [staffInput, setStaffInput] = useState('');
+  const [newCS, setNewCS] = useState({ hours_per_week: 4, is_lab_required: false });
 
-  useEffect(() => {
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [createSubjectForm, setCreateSubjectForm] = useState<CreateSubjectForm>({
+    name: '',
+    code: '',
+    type: 'core',
+    staff_input: '',
+    hours_per_week: 4,
+    is_lab_required: false
+  });
+
+  const [editingSubjectId, setEditingSubjectId] = useState<number | null>(null);
+  const [editForm, setEditForm] = useState<EditSubjectForm>({
+    staff_input: '',
+    hours_per_week: 4,
+    is_lab_required: false
+  });
+  const [status, setStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+
+  const refreshData = () => {
     fetch('/api/classes').then(res => res.json()).then(data => {
-      setCls(data.find((x: any) => x.id === parseInt(id!)));
+      setCls(data.find((x: Class) => x.id === parseInt(id || '0', 10)) || null);
     });
     fetch(`/api/classes/${id}/subjects`).then(res => res.json()).then(setClassSubjects);
     fetch('/api/subjects').then(res => res.json()).then(setAllSubjects);
     fetch('/api/staff').then(res => res.json()).then(setAllStaff);
     fetch(`/api/timetable/${id}`).then(res => res.json()).then(setTimetable);
     fetch('/api/settings').then(res => res.json()).then(setSettings);
+  };
+
+  useEffect(() => {
+    refreshData();
   }, [id]);
 
+  const subjectSuggestionValues = useMemo(
+    () => allSubjects.map(subject => `${subject.code} - ${subject.name}`),
+    [allSubjects]
+  );
+
+  const staffSuggestionValues = useMemo(
+    () => allStaff.map(staff => staff.name),
+    [allStaff]
+  );
+
+  const resolveSubjectId = (value: string): number | null => {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) return null;
+
+    const exactLabel = allSubjects.find(
+      s => `${s.code} - ${s.name}`.toLowerCase() === normalized
+    );
+    if (exactLabel) return exactLabel.id;
+
+    const exactCode = allSubjects.find(s => s.code.toLowerCase() === normalized);
+    if (exactCode) return exactCode.id;
+
+    const exactName = allSubjects.find(s => s.name.toLowerCase() === normalized);
+    if (exactName) return exactName.id;
+
+    return null;
+  };
+
+  const resolveStaffId = (value: string): number | null => {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) return null;
+
+    const exactName = allStaff.find(s => s.name.toLowerCase() === normalized);
+    return exactName ? exactName.id : null;
+  };
+
   const handleAddSubject = async () => {
+    if (!id) return;
+    setStatus(null);
+
+    const subjectId = resolveSubjectId(subjectInput);
+    if (!subjectId) {
+      setStatus({ type: 'error', msg: 'Select a valid subject from suggestions.' });
+      return;
+    }
+
+    const staffId = resolveStaffId(staffInput);
+    if (staffInput.trim() && staffId === null) {
+      setStatus({ type: 'error', msg: 'Select a valid staff member from suggestions.' });
+      return;
+    }
+
     const res = await fetch(`/api/classes/${id}/subjects`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        ...newCS,
-        subject_id: parseInt(newCS.subject_id),
-        staff_id: newCS.staff_id ? parseInt(newCS.staff_id) : null
+        subject_id: subjectId,
+        staff_id: staffId,
+        hours_per_week: newCS.hours_per_week,
+        is_lab_required: newCS.is_lab_required
       })
     });
-    const data = await res.json();
-    // Refresh subjects
-    fetch(`/api/classes/${id}/subjects`).then(res => res.json()).then(setClassSubjects);
-    setNewCS({ subject_id: '', staff_id: '', hours_per_week: 3, is_lab_required: false });
+
+    if (res.ok) {
+      setSubjectInput('');
+      setStaffInput('');
+      setNewCS({ hours_per_week: 4, is_lab_required: false });
+      refreshData();
+      setStatus({ type: 'success', msg: 'Subject assigned successfully.' });
+    } else {
+      const err = await res.json();
+      setStatus({ type: 'error', msg: err.error || 'Unable to assign subject.' });
+    }
   };
 
-  const handleAssignSlot = async (day: number, period: number, subjectId: number | null, staffId: number | null, type: string) => {
+  const handleCreateAndAssign = async () => {
+    if (!id || !cls) return;
+    setStatus(null);
+
+    const staffId = resolveStaffId(createSubjectForm.staff_input);
+    if (createSubjectForm.staff_input.trim() && staffId === null) {
+      setStatus({ type: 'error', msg: 'Select a valid staff member from suggestions.' });
+      return;
+    }
+
+    const res = await fetch('/api/subjects-and-assign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: createSubjectForm.name,
+        code: createSubjectForm.code,
+        type: createSubjectForm.type,
+        dept_id: cls.dept_id,
+        class_id: parseInt(id, 10),
+        staff_id: staffId,
+        hours_per_week: createSubjectForm.hours_per_week,
+        is_lab_required: createSubjectForm.is_lab_required
+      })
+    });
+
+    if (res.ok) {
+      setShowCreateModal(false);
+      setCreateSubjectForm({
+        name: '',
+        code: '',
+        type: 'core',
+        staff_input: '',
+        hours_per_week: 4,
+        is_lab_required: false
+      });
+      refreshData();
+      setStatus({ type: 'success', msg: 'Subject created and assigned successfully.' });
+    } else {
+      const err = await res.json();
+      setStatus({ type: 'error', msg: err.error || 'Unable to create subject.' });
+    }
+  };
+
+  const handleAssignSlot = async (
+    day: number,
+    period: number,
+    subjectId: number | null,
+    assignedStaffId: number | null,
+    type: string | null
+  ) => {
+    if (!id) return;
+
     const res = await fetch('/api/timetable/assign', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        class_id: parseInt(id!),
+        class_id: parseInt(id, 10),
         day_order: day,
-        period: period,
+        period,
         subject_id: subjectId,
-        staff_id: staffId,
-        type: type,
+        staff_id: assignedStaffId,
+        lab_id: null,
+        type,
         is_locked: false
       })
     });
+
     if (res.ok) {
-      fetch(`/api/timetable/${id}`).then(res => res.json()).then(setTimetable);
+      fetch(`/api/timetable/${id}`).then(response => response.json()).then(setTimetable);
     } else {
       const err = await res.json();
-      alert(err.error);
+      alert(err.error || 'Unable to assign slot.');
     }
   };
 
-  if (!cls || !settings) return <div className="text-cyan-400 font-mono">Loading class details...</div>;
+  const startEditing = (cs: ClassSubject) => {
+    setEditingSubjectId(cs.id);
+    setEditForm({
+      staff_input: cs.staff_name || '',
+      hours_per_week: cs.hours_per_week,
+      is_lab_required: cs.is_lab_required
+    });
+  };
 
-  const periods = Array.from({ length: parseInt(settings.periods_per_day) }, (_, i) => i + 1);
+  const handleSaveSubjectEdit = async (classSubjectId: number) => {
+    if (!id) return;
+    setStatus(null);
+
+    const staffId = resolveStaffId(editForm.staff_input);
+    if (editForm.staff_input.trim() && staffId === null) {
+      setStatus({ type: 'error', msg: 'Select a valid staff member from suggestions before saving.' });
+      return;
+    }
+
+    const res = await fetch(`/api/classes/${id}/subjects/${classSubjectId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        staff_id: staffId,
+        hours_per_week: editForm.hours_per_week,
+        is_lab_required: editForm.is_lab_required
+      })
+    });
+
+    if (res.ok) {
+      setEditingSubjectId(null);
+      refreshData();
+      setStatus({ type: 'success', msg: 'Subject assignment updated successfully.' });
+    } else {
+      const err = await res.json();
+      setStatus({ type: 'error', msg: err.error || 'Unable to save subject assignment.' });
+    }
+  };
+
+  const handleUnassignStaff = async (classSubjectId: number) => {
+    if (!id) return;
+    setStatus(null);
+
+    const cs = classSubjects.find(x => x.id === classSubjectId);
+    if (!cs) return;
+
+    const res = await fetch(`/api/classes/${id}/subjects/${classSubjectId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        staff_id: null,
+        hours_per_week: cs.hours_per_week,
+        is_lab_required: cs.is_lab_required
+      })
+    });
+
+    if (res.ok) {
+      refreshData();
+      setStatus({ type: 'success', msg: 'Staff unassigned successfully.' });
+    } else {
+      const err = await res.json();
+      setStatus({ type: 'error', msg: err.error || 'Unable to unassign staff.' });
+    }
+  };
+
+  const handleUnassignSubject = async (classSubjectId: number) => {
+    if (!id) return;
+    setStatus(null);
+
+    const shouldDelete = window.confirm('Unassign this subject from this class?');
+    if (!shouldDelete) return;
+
+    const res = await fetch(`/api/classes/${id}/subjects/${classSubjectId}`, {
+      method: 'DELETE'
+    });
+
+    if (res.ok) {
+      setEditingSubjectId(null);
+      refreshData();
+      setStatus({ type: 'success', msg: 'Subject unassigned successfully.' });
+    } else {
+      const err = await res.json();
+      setStatus({ type: 'error', msg: err.error || 'Unable to unassign subject.' });
+    }
+  };
+
+  const labRequirements = useMemo(() => {
+    return classSubjects
+      .filter(cs => cs.is_lab_required)
+      .map(cs => {
+        const allocated = timetable.some(
+          slot => slot.subject_id === cs.subject_id && slot.type === 'lab' && !!slot.lab_id
+        );
+        return {
+          ...cs,
+          allocated
+        };
+      });
+  }, [classSubjects, timetable]);
+
+  if (!cls || !settings) {
+    return <div className="text-slate-300">Loading class details...</div>;
+  }
+
+  const periods = Array.from({ length: parseInt(settings.periods_per_day, 10) }, (_, i) => i + 1);
   const days = [1, 2, 3, 4, 5, 6];
 
   return (
-    <div className="space-y-12">
-      <header className="flex justify-between items-end border-b border-[#1e2d47] pb-6">
-        <div>
-          <div className="text-[10px] font-mono text-cyan-500 uppercase tracking-[0.2em] mb-1">{cls.dept_name}</div>
-          <h1 className="text-4xl font-mono font-bold text-white tracking-tighter uppercase">{cls.name}</h1>
-          <p className="text-slate-500 mt-2">Configure subjects and manage the weekly timetable grid.</p>
-        </div>
+    <div className="max-w-6xl mx-auto space-y-6">
+      <button
+        onClick={() => navigate(-1)}
+        className="inline-flex items-center gap-2 text-sm text-slate-400 hover:text-white transition-colors"
+      >
+        <ArrowLeft size={14} />
+        Back to Classes
+      </button>
+
+      <header>
+        <h1 className="text-3xl font-bold text-white">Class Subject Management</h1>
+        <p className="text-sm text-slate-400 mt-1">
+          {cls.name} - Year {cls.year} - {cls.dept_name || 'Department'}
+        </p>
       </header>
 
-      <div className="grid grid-cols-1 xl:grid-cols-4 gap-8">
-        {/* Subject Configuration */}
-        <div className="xl:col-span-1 space-y-6">
-          <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl overflow-hidden">
-            <div className="bg-[#141c2e] px-6 py-4 border-b border-[#1e2d47] flex items-center gap-3">
-              <BookOpen className="text-violet-400" size={20} />
-              <h2 className="font-mono font-bold text-white uppercase tracking-wider">Class Subjects</h2>
-            </div>
-            <div className="p-6 space-y-6">
-              <div className="space-y-3">
-                <select 
-                  className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
-                  value={newCS.subject_id}
-                  onChange={e => setNewCS({...newCS, subject_id: e.target.value})}
-                >
-                  <option value="">Select Subject</option>
-                  {allSubjects.map(s => <option key={s.id} value={s.id}>{s.name} ({s.code})</option>)}
-                </select>
-                <select 
-                  className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
-                  value={newCS.staff_id}
-                  onChange={e => setNewCS({...newCS, staff_id: e.target.value})}
-                >
-                  <option value="">Select Staff</option>
-                  {allStaff.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-                <div className="flex gap-2">
-                  <input 
-                    type="number" 
-                    placeholder="Hrs/Wk" 
-                    className="flex-1 bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
-                    value={newCS.hours_per_week || ''}
-                    onChange={e => setNewCS({...newCS, hours_per_week: parseInt(e.target.value) || 0})}
-                  />
-                  <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
-                    <input 
-                      type="checkbox" 
-                      checked={newCS.is_lab_required}
-                      onChange={e => setNewCS({...newCS, is_lab_required: e.target.checked})}
-                    />
-                    Lab?
-                  </label>
+      <section className="rounded-xl border border-[#1e2d47] bg-[#0f1623] p-5 space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-white">Assign Subject</h2>
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-md border border-[#2a3a57] text-sm text-slate-200 hover:bg-[#141c2e]"
+          >
+            <Plus size={14} />
+            Create Subject
+          </button>
+        </div>
+
+        {status && (
+          <div className={
+            status.type === 'success'
+              ? 'rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300'
+              : 'rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-300'
+          }>
+            {status.msg}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-end">
+          <div className="lg:col-span-4">
+            <label className="text-xs text-slate-400">Subject</label>
+            <input
+              list="subject-suggestions"
+              placeholder="Type subject code or name"
+              className="w-full mt-1 px-3 py-2 rounded-md border border-[#2a3a57] bg-[#0a0e17] text-sm"
+              value={subjectInput}
+              onChange={e => setSubjectInput(e.target.value)}
+            />
+            <datalist id="subject-suggestions">
+              {subjectSuggestionValues.map(value => (
+                <option key={value} value={value} />
+              ))}
+            </datalist>
+          </div>
+
+          <div className="lg:col-span-3">
+            <label className="text-xs text-slate-400">Assign Staff</label>
+            <input
+              list="staff-suggestions"
+              placeholder="Type staff name or leave empty"
+              className="w-full mt-1 px-3 py-2 rounded-md border border-[#2a3a57] bg-[#0a0e17] text-sm"
+              value={staffInput}
+              onChange={e => setStaffInput(e.target.value)}
+            />
+            <datalist id="staff-suggestions">
+              {staffSuggestionValues.map(value => (
+                <option key={value} value={value} />
+              ))}
+            </datalist>
+          </div>
+
+          <div className="lg:col-span-2">
+            <label className="text-xs text-slate-400">Hours / Week</label>
+            <input
+              type="number"
+              min="1"
+              className="w-full mt-1 px-3 py-2 rounded-md border border-[#2a3a57] bg-[#0a0e17] text-sm"
+              value={newCS.hours_per_week}
+              onChange={e => setNewCS({ ...newCS, hours_per_week: parseInt(e.target.value, 10) || 1 })}
+            />
+          </div>
+
+          <div className="lg:col-span-3 flex gap-2 items-center">
+            <label className="inline-flex items-center gap-2 text-sm text-slate-300">
+              <input
+                type="checkbox"
+                checked={newCS.is_lab_required}
+                onChange={e => setNewCS({ ...newCS, is_lab_required: e.target.checked })}
+              />
+              Lab
+            </label>
+            <button
+              onClick={handleAddSubject}
+              className="ml-auto px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium"
+            >
+              Assign
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-[#1e2d47] bg-[#0f1623] p-5">
+        <h2 className="text-lg font-semibold text-white mb-4">Assigned Subjects ({classSubjects.length})</h2>
+        <div className="space-y-2">
+          {classSubjects.map(cs => (
+            <div key={cs.id} className="rounded-lg border border-[#243550] bg-[#141c2e] p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-white">{cs.subject_code} {cs.subject_name}</p>
+                  <p className="text-xs text-slate-400">
+                    {cs.hours_per_week}h/week - {cs.staff_name || 'Unassigned'}
+                  </p>
                 </div>
-                <button 
-                  onClick={handleAddSubject}
-                  className="w-full bg-violet-600 hover:bg-violet-500 text-white font-mono font-bold py-2 rounded transition-all flex items-center justify-center gap-2"
-                >
-                  <Plus size={16} /> ADD SUBJECT
-                </button>
+                <span className="text-xs px-2 py-1 rounded bg-[#223451] text-slate-200">
+                  {cs.staff_id ? 'Assigned' : 'Unassigned'}
+                </span>
               </div>
 
-              <div className="space-y-2">
-                {classSubjects.map(cs => (
-                  <div key={cs.id} className="p-3 bg-[#141c2e] border border-[#1e2d47] rounded text-sm group">
-                    <div className="flex justify-between items-start">
-                      <span className="font-bold text-white">{cs.subject_name}</span>
-                      <span className="text-[10px] font-mono text-cyan-500">{cs.subject_code}</span>
-                    </div>
-                    <div className="flex justify-between items-center mt-1">
-                      <span className="text-xs text-slate-500">{cs.staff_name || 'No staff'}</span>
-                      <span className="text-xs text-slate-400 font-mono">{cs.hours_per_week}h</span>
-                    </div>
+              {editingSubjectId === cs.id ? (
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-2 mt-3">
+                  <input
+                    list="staff-suggestions"
+                    className="md:col-span-2 px-3 py-2 rounded-md border border-[#2a3a57] bg-[#0a0e17] text-sm"
+                    value={editForm.staff_input}
+                    onChange={e => setEditForm({ ...editForm, staff_input: e.target.value })}
+                    placeholder="Assign staff"
+                  />
+                  <input
+                    type="number"
+                    min="1"
+                    className="px-3 py-2 rounded-md border border-[#2a3a57] bg-[#0a0e17] text-sm"
+                    value={editForm.hours_per_week}
+                    onChange={e => setEditForm({ ...editForm, hours_per_week: parseInt(e.target.value, 10) || 1 })}
+                  />
+                  <label className="inline-flex items-center gap-2 text-sm text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={editForm.is_lab_required}
+                      onChange={e => setEditForm({ ...editForm, is_lab_required: e.target.checked })}
+                    />
+                    Lab
+                  </label>
+                  <div className="md:col-span-4 flex gap-2 justify-end">
+                    <button
+                      onClick={() => setEditingSubjectId(null)}
+                      className="px-3 py-1.5 rounded border border-[#2a3a57] text-xs text-slate-200"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => handleSaveSubjectEdit(cs.id)}
+                      className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white text-xs"
+                    >
+                      Save
+                    </button>
+                    <button
+                      onClick={() => handleUnassignStaff(cs.id)}
+                      className="px-3 py-1.5 rounded border border-[#2a3a57] text-xs text-slate-200"
+                    >
+                      Unassign Staff
+                    </button>
+                    <button
+                      onClick={() => handleUnassignSubject(cs.id)}
+                      className="px-3 py-1.5 rounded bg-red-600 hover:bg-red-700 text-white text-xs"
+                    >
+                      Unassign Subject
+                    </button>
                   </div>
-                ))}
-              </div>
+                </div>
+              ) : (
+                <div className="flex justify-end mt-3">
+                  <button
+                    onClick={() => startEditing(cs)}
+                    className="px-3 py-1.5 rounded border border-[#2a3a57] text-xs text-slate-200 hover:bg-[#0a0e17]"
+                  >
+                    Edit Assignment
+                  </button>
+                </div>
+              )}
             </div>
-          </section>
+          ))}
+
+          {classSubjects.length === 0 && (
+            <p className="text-sm text-slate-400">No subjects assigned yet.</p>
+          )}
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-[#1e2d47] bg-[#0f1623] p-5">
+        <h2 className="text-lg font-semibold text-white mb-4">Lab Requirements</h2>
+        <div className="space-y-3">
+          {labRequirements.map(lab => (
+            <div key={lab.id} className="rounded-lg border border-[#243550] bg-[#141c2e] p-4 flex items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <FlaskConical size={18} className="text-cyan-400 mt-0.5" />
+                <div>
+                  <p className="text-sm font-semibold text-white">
+                    {lab.subject_name} ({lab.subject_code})
+                  </p>
+                  <p className="text-xs text-slate-400">Systems needed: {cls.student_strength}</p>
+                  <p className="text-xs text-slate-400">Preferred block: 2 periods</p>
+                </div>
+              </div>
+              <span
+                className={
+                  lab.allocated
+                    ? 'text-xs px-2 py-1 rounded bg-emerald-700/20 text-emerald-300'
+                    : 'text-xs px-2 py-1 rounded bg-amber-700/20 text-amber-300'
+                }
+              >
+                {lab.allocated ? 'Allocated' : 'Pending'}
+              </span>
+            </div>
+          ))}
+          {labRequirements.length === 0 && (
+            <p className="text-sm text-slate-400">No lab requirements for this class.</p>
+          )}
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-[#1e2d47] bg-[#0f1623] p-5">
+        <div className="flex items-center gap-2 mb-4">
+          <Clock size={18} className="text-cyan-400" />
+          <h2 className="text-lg font-semibold text-white">Weekly Timetable</h2>
         </div>
 
-        {/* Timetable Grid */}
-        <div className="xl:col-span-3 space-y-6">
-          <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl overflow-hidden">
-            <div className="bg-[#141c2e] px-6 py-4 border-b border-[#1e2d47] flex justify-between items-center">
-              <div className="flex items-center gap-3">
-                <Clock className="text-cyan-400" size={20} />
-                <h2 className="font-mono font-bold text-white uppercase tracking-wider">Weekly Schedule</h2>
-              </div>
-              <div className="flex gap-4 text-[10px] font-mono uppercase tracking-widest">
-                <span className="flex items-center gap-1 text-orange-400"><Lock size={10} /> Locked</span>
-                <span className="flex items-center gap-1 text-cyan-400"><Unlock size={10} /> Editable</span>
-              </div>
-            </div>
-            <div className="p-6 overflow-x-auto">
-              <table className="w-full border-collapse">
-                <thead>
-                  <tr>
-                    <th className="p-3 text-left text-[10px] font-mono text-slate-500 uppercase border-b border-[#1e2d47]">Day Order</th>
-                    {periods.map(p => (
-                      <th key={p} className="p-3 text-center text-[10px] font-mono text-slate-500 uppercase border-b border-[#1e2d47]">
-                        Period {p}
-                        {p === parseInt(settings.break_after_period) && <div className="text-orange-500 mt-1">BREAK</div>}
-                        {p === parseInt(settings.lunch_after_period) && <div className="text-cyan-500 mt-1">LUNCH</div>}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {days.map(day => (
-                    <tr key={day} className="border-b border-[#1e2d47]/50 hover:bg-[#141c2e]/30 transition-colors">
-                      <td className="p-4 font-mono font-bold text-cyan-500">DAY {day}</td>
-                      {periods.map(period => {
-                        const slot = timetable.find(s => s.day_order === day && s.period === period);
-                        return (
-                          <td key={period} className="p-2">
-                            <div className={clsx(
-                              "min-h-[80px] p-2 rounded border transition-all flex flex-col justify-center items-center text-center gap-1",
-                              slot ? (
-                                slot.type === 'placement' 
-                                  ? "bg-emerald-500/10 border-emerald-500/30 shadow-[inset_0_0_10px_rgba(16,185,129,0.05)]" 
-                                  : slot.is_locked ? "bg-orange-500/5 border-orange-500/20" : "bg-cyan-500/5 border-cyan-500/20"
-                              ) : "bg-[#0a0e17] border-dashed border-[#1e2d47]"
-                            )}>
-                              {slot ? (
-                                <>
-                                  <div className={clsx(
-                                    "font-bold text-xs",
-                                    slot.type === 'placement' ? "text-emerald-400" : "text-white"
-                                  )}>
-                                    {slot.type === 'placement' ? 'PLACEMENT' : slot.subject_code}
-                                  </div>
-                                  {slot.type !== 'placement' && <div className="text-[10px] text-slate-500">{slot.staff_name}</div>}
-                                  {slot.lab_name && <div className="text-[9px] text-emerald-400 font-mono">{slot.lab_name}</div>}
-                                </>
-                              ) : (
-                                <select 
-                                  className="w-full bg-transparent text-[10px] text-slate-600 outline-none cursor-pointer hover:text-cyan-400"
-                                  onChange={(e) => {
-                                    const cs = classSubjects.find(x => x.id === parseInt(e.target.value));
-                                    if (cs) handleAssignSlot(day, period, cs.subject_id, cs.staff_id, cs.is_lab_required ? 'lab' : 'core');
-                                  }}
-                                >
-                                  <option value="">+</option>
-                                  {classSubjects.map(cs => <option key={cs.id} value={cs.id}>{cs.subject_code}</option>)}
-                                </select>
-                              )}
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse">
+            <thead>
+              <tr>
+                <th className="p-2 text-left text-xs text-slate-400 border-b border-[#243550]">Day</th>
+                {periods.map(period => (
+                  <th key={period} className="p-2 text-center text-xs text-slate-400 border-b border-[#243550]">
+                    P{period}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {days.map(day => (
+                <tr key={day}>
+                  <td className="p-2 text-sm font-medium text-slate-200 border-b border-[#243550]">Day {day}</td>
+                  {periods.map(period => {
+                    const slot = timetable.find(s => s.day_order === day && s.period === period);
+
+                    return (
+                      <td key={period} className="p-2 border-b border-[#243550]">
+                        <div className={clsx(
+                          'min-h-[72px] rounded border p-2',
+                          slot ? 'border-[#2d4b6d] bg-[#122034]' : 'border-dashed border-[#2a3a57] bg-[#0a0e17]'
+                        )}>
+                          {slot ? (
+                            <div className="space-y-1">
+                              <div className="text-xs font-semibold text-white">{slot.subject_code || slot.type || 'Slot'}</div>
+                              <div className="text-[11px] text-slate-400">{slot.staff_name || 'No staff'}</div>
+                              {slot.lab_name && <div className="text-[11px] text-cyan-400">{slot.lab_name}</div>}
                             </div>
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
+                          ) : (
+                            <select
+                              className="w-full text-xs bg-transparent text-slate-300 outline-none"
+                              onChange={e => {
+                                if (!e.target.value) return;
+                                const cs = classSubjects.find(x => x.id === parseInt(e.target.value, 10));
+                                if (cs) {
+                                  handleAssignSlot(day, period, cs.subject_id, cs.staff_id, cs.is_lab_required ? 'lab' : 'core');
+                                }
+                              }}
+                              value=""
+                            >
+                              <option value="">Assign</option>
+                              {classSubjects.map(cs => (
+                                <option key={cs.id} value={cs.id}>
+                                  {cs.subject_code}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                        </div>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
-      </div>
+      </section>
+
+      {showCreateModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="w-full max-w-lg rounded-xl border border-[#2a3a57] bg-[#0f1623] p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-white">Create Subject</h3>
+              <button onClick={() => setShowCreateModal(false)} className="text-slate-400 hover:text-white">
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-slate-400">Subject Name</label>
+                <input
+                  className="w-full mt-1 px-3 py-2 rounded-md border border-[#2a3a57] bg-[#0a0e17] text-sm"
+                  value={createSubjectForm.name}
+                  onChange={e => setCreateSubjectForm({ ...createSubjectForm, name: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400">Subject Code</label>
+                <input
+                  className="w-full mt-1 px-3 py-2 rounded-md border border-[#2a3a57] bg-[#0a0e17] text-sm"
+                  value={createSubjectForm.code}
+                  onChange={e => setCreateSubjectForm({ ...createSubjectForm, code: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400">Type</label>
+                <select
+                  className="w-full mt-1 px-3 py-2 rounded-md border border-[#2a3a57] bg-[#0a0e17] text-sm"
+                  value={createSubjectForm.type}
+                  onChange={e => setCreateSubjectForm({ ...createSubjectForm, type: e.target.value as CreateSubjectForm['type'] })}
+                >
+                  <option value="core">Core</option>
+                  <option value="common">Common</option>
+                  <option value="lab">Lab</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-slate-400">Assign Staff</label>
+                <input
+                  list="staff-suggestions"
+                  className="w-full mt-1 px-3 py-2 rounded-md border border-[#2a3a57] bg-[#0a0e17] text-sm"
+                  value={createSubjectForm.staff_input}
+                  onChange={e => setCreateSubjectForm({ ...createSubjectForm, staff_input: e.target.value })}
+                  placeholder="Optional"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400">Hours / Week</label>
+                <input
+                  type="number"
+                  min="1"
+                  className="w-full mt-1 px-3 py-2 rounded-md border border-[#2a3a57] bg-[#0a0e17] text-sm"
+                  value={createSubjectForm.hours_per_week}
+                  onChange={e => setCreateSubjectForm({ ...createSubjectForm, hours_per_week: parseInt(e.target.value, 10) || 1 })}
+                />
+              </div>
+              <div className="flex items-end">
+                <label className="inline-flex items-center gap-2 text-sm text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={createSubjectForm.is_lab_required}
+                    onChange={e => setCreateSubjectForm({ ...createSubjectForm, is_lab_required: e.target.checked })}
+                  />
+                  Lab Required
+                </label>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                onClick={() => setShowCreateModal(false)}
+                className="px-4 py-2 rounded-md border border-[#2a3a57] text-sm text-slate-200"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateAndAssign}
+                className="px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-700 text-sm text-white"
+              >
+                Create & Assign
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

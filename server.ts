@@ -44,7 +44,9 @@ db.exec(`
     year INTEGER NOT NULL,
     semester INTEGER NOT NULL,
     student_strength INTEGER DEFAULT 0,
-    FOREIGN KEY (dept_id) REFERENCES departments(id)
+    tutor_staff_id INTEGER,
+    FOREIGN KEY (dept_id) REFERENCES departments(id),
+    FOREIGN KEY (tutor_staff_id) REFERENCES staff(id)
   );
 
   CREATE TABLE IF NOT EXISTS class_subjects (
@@ -107,6 +109,11 @@ db.exec(`
     FOREIGN KEY (class_id) REFERENCES classes(id)
   );
 `);
+
+const classColumns = db.prepare("PRAGMA table_info(classes)").all() as { name: string }[];
+if (!classColumns.some((column) => column.name === "tutor_staff_id")) {
+  db.exec("ALTER TABLE classes ADD COLUMN tutor_staff_id INTEGER REFERENCES staff(id)");
+}
 
 // Seed initial settings if not present
 const seedSettings = db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)");
@@ -209,7 +216,7 @@ async function startServer() {
   app.get("/api/staff", (req, res) => {
     const staff = db.prepare(`
       SELECT s.*, d.name as dept_name,
-             (SELECT COUNT(*) FROM timetable_slots WHERE staff_id = s.id) as current_workload
+             COALESCE((SELECT SUM(hours_per_week) FROM class_subjects WHERE staff_id = s.id), 0) as current_workload
       FROM staff s 
       LEFT JOIN departments d ON s.dept_id = d.id
     `).all();
@@ -229,26 +236,86 @@ async function startServer() {
   });
 
   app.post("/api/subjects", (req, res) => {
-    const { name, code, type, dept_id, is_addon } = req.body;
-    const stmt = db.prepare("INSERT INTO subjects (name, code, type, dept_id, is_addon) VALUES (?, ?, ?, ?, ?)");
-    const info = stmt.run(name, code, type, dept_id, is_addon ? 1 : 0);
-    res.json({ id: info.lastInsertRowid });
+    try {
+      const { name, code, type, dept_id, is_addon } = req.body;
+      const normalizedDeptId = dept_id ? Number(dept_id) : null;
+      const stmt = db.prepare("INSERT INTO subjects (name, code, type, dept_id, is_addon) VALUES (?, ?, ?, ?, ?)");
+      const info = stmt.run(name?.trim(), code?.trim(), type, normalizedDeptId, is_addon ? 1 : 0);
+      const subject = db.prepare("SELECT * FROM subjects WHERE id = ?").get(info.lastInsertRowid);
+      res.json(subject);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
   });
 
   app.get("/api/classes", (req, res) => {
     const classes = db.prepare(`
-      SELECT c.*, d.name as dept_name 
+      SELECT c.*, d.name as dept_name, tutor.name as tutor_name
       FROM classes c 
       JOIN departments d ON c.dept_id = d.id
+      LEFT JOIN staff tutor ON c.tutor_staff_id = tutor.id
     `).all();
     res.json(classes);
   });
 
   app.post("/api/classes", (req, res) => {
-    const { name, dept_id, year, semester, student_strength } = req.body;
-    const stmt = db.prepare("INSERT INTO classes (name, dept_id, year, semester, student_strength) VALUES (?, ?, ?, ?, ?)");
-    const info = stmt.run(name, dept_id, year, semester, student_strength || 0);
-    res.json({ id: info.lastInsertRowid });
+    try {
+      const { name, dept_id, year, semester, student_strength, tutor_staff_id } = req.body;
+      const stmt = db.prepare(`
+        INSERT INTO classes (name, dept_id, year, semester, student_strength, tutor_staff_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      const info = stmt.run(
+        name?.trim(),
+        Number(dept_id),
+        Number(year),
+        Number(semester),
+        Number(student_strength) || 0,
+        tutor_staff_id ? Number(tutor_staff_id) : null
+      );
+      const createdClass = db.prepare(`
+        SELECT c.*, d.name as dept_name, tutor.name as tutor_name
+        FROM classes c
+        JOIN departments d ON c.dept_id = d.id
+        LEFT JOIN staff tutor ON c.tutor_staff_id = tutor.id
+        WHERE c.id = ?
+      `).get(info.lastInsertRowid);
+      res.json(createdClass);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.patch("/api/classes/:id", (req, res) => {
+    try {
+      const classId = Number(req.params.id);
+      const existing = db.prepare("SELECT * FROM classes WHERE id = ?").get(classId) as any;
+      if (!existing) {
+        return res.status(404).json({ error: "Class not found" });
+      }
+
+      const studentStrength = req.body.student_strength ?? existing.student_strength;
+      const tutorStaffId = req.body.tutor_staff_id === undefined
+        ? existing.tutor_staff_id
+        : (req.body.tutor_staff_id ? Number(req.body.tutor_staff_id) : null);
+
+      db.prepare(`
+        UPDATE classes
+        SET student_strength = ?, tutor_staff_id = ?
+        WHERE id = ?
+      `).run(Number(studentStrength) || 0, tutorStaffId, classId);
+
+      const updatedClass = db.prepare(`
+        SELECT c.*, d.name as dept_name, tutor.name as tutor_name
+        FROM classes c
+        JOIN departments d ON c.dept_id = d.id
+        LEFT JOIN staff tutor ON c.tutor_staff_id = tutor.id
+        WHERE c.id = ?
+      `).get(classId);
+      res.json(updatedClass);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
   });
 
   app.get("/api/classes/:id/subjects", (req, res) => {
@@ -269,6 +336,127 @@ async function startServer() {
     res.json({ id: info.lastInsertRowid });
   });
 
+  // Bulk add subjects to a class
+  app.post("/api/classes/:id/subjects/bulk", (req, res) => {
+    try {
+      const { subjects } = req.body;
+      const classId = req.params.id;
+      
+      const transaction = db.transaction(() => {
+        const stmt = db.prepare("INSERT INTO class_subjects (class_id, subject_id, staff_id, hours_per_week, is_lab_required) VALUES (?, ?, ?, ?, ?)");
+        
+        for (const subject of subjects) {
+          stmt.run(
+            classId,
+            subject.subject_id,
+            subject.staff_id || null,
+            subject.hours_per_week || 3,
+            subject.is_lab_required ? 1 : 0
+          );
+        }
+      });
+      
+      transaction();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  // Create subject and assign to class
+  app.post("/api/subjects-and-assign", (req, res) => {
+    try {
+      const { name, code, type, dept_id, class_id, staff_id, hours_per_week, is_lab_required } = req.body;
+      
+      const transaction = db.transaction(() => {
+        // Create the subject
+        const subjectStmt = db.prepare("INSERT INTO subjects (name, code, type, dept_id, is_addon) VALUES (?, ?, ?, ?, ?)");
+        const subjectInfo = subjectStmt.run(
+          name?.trim(),
+          code?.trim(),
+          type,
+          dept_id ? Number(dept_id) : null,
+          0
+        );
+        const subjectId = subjectInfo.lastInsertRowid;
+        
+        // Assign to class
+        const assignStmt = db.prepare("INSERT INTO class_subjects (class_id, subject_id, staff_id, hours_per_week, is_lab_required) VALUES (?, ?, ?, ?, ?)");
+        assignStmt.run(
+          class_id,
+          subjectId,
+          staff_id || null,
+          hours_per_week || 3,
+          is_lab_required ? 1 : 0
+        );
+        
+        return subjectId;
+      });
+      
+      const subjectId = transaction();
+      const subject = db.prepare("SELECT * FROM subjects WHERE id = ?").get(subjectId);
+      res.json(subject);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  // Update class subject
+  app.patch("/api/classes/:classId/subjects/:classSubjectId", (req, res) => {
+    try {
+      const { staff_id, hours_per_week, is_lab_required } = req.body;
+      const { classId, classSubjectId } = req.params;
+      
+      // Verify the class subject exists
+      const existing = db.prepare("SELECT * FROM class_subjects WHERE id = ? AND class_id = ?").get(classSubjectId, classId) as any;
+      if (!existing) {
+        return res.status(404).json({ error: "Class subject not found" });
+      }
+      
+      const updatedHours = hours_per_week !== undefined ? hours_per_week : existing.hours_per_week;
+      const updatedStaff = staff_id !== undefined ? (staff_id || null) : existing.staff_id;
+      const updatedLab = is_lab_required !== undefined ? (is_lab_required ? 1 : 0) : existing.is_lab_required;
+      
+      db.prepare(`
+        UPDATE class_subjects
+        SET staff_id = ?, hours_per_week = ?, is_lab_required = ?
+        WHERE id = ?
+      `).run(updatedStaff, updatedHours, updatedLab, classSubjectId);
+      
+      const updated = db.prepare(`
+        SELECT cs.*, s.name as subject_name, s.code as subject_code, st.name as staff_name
+        FROM class_subjects cs
+        JOIN subjects s ON cs.subject_id = s.id
+        LEFT JOIN staff st ON cs.staff_id = st.id
+        WHERE cs.id = ?
+      `).get(classSubjectId);
+      
+      res.json(updated);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  // Delete class subject
+  app.delete("/api/classes/:classId/subjects/:classSubjectId", (req, res) => {
+    try {
+      const { classId, classSubjectId } = req.params;
+      
+      // Verify the class subject exists
+      const existing = db.prepare("SELECT * FROM class_subjects WHERE id = ? AND class_id = ?").get(classSubjectId, classId);
+      if (!existing) {
+        return res.status(404).json({ error: "Class subject not found" });
+      }
+      
+      // Delete the class subject
+      db.prepare("DELETE FROM class_subjects WHERE id = ?").run(classSubjectId);
+      
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
   app.get("/api/labs", (req, res) => {
     const labs = db.prepare("SELECT * FROM labs").all();
     res.json(labs);
@@ -279,6 +467,27 @@ async function startServer() {
     const stmt = db.prepare("INSERT INTO labs (name, dept_id, systems_count) VALUES (?, ?, ?)");
     const info = stmt.run(name, dept_id, systems_count);
     res.json({ id: info.lastInsertRowid });
+  });
+
+  app.delete("/api/labs/:id", (req, res) => {
+    try {
+      const labId = Number(req.params.id);
+      const existing = db.prepare("SELECT * FROM labs WHERE id = ?").get(labId);
+
+      if (!existing) {
+        return res.status(404).json({ error: "Lab not found" });
+      }
+
+      const usage = db.prepare("SELECT COUNT(*) as count FROM timetable_slots WHERE lab_id = ?").get(labId) as { count: number };
+      if (usage.count > 0) {
+        return res.status(400).json({ error: "This lab is already used in the timetable and cannot be deleted." });
+      }
+
+      db.prepare("DELETE FROM labs WHERE id = ?").run(labId);
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
   });
 
   app.get("/api/timetable/:classId", (req, res) => {
@@ -515,8 +724,8 @@ async function startServer() {
   app.post("/api/timetable/generate", (req, res) => {
     try {
       const transaction = db.transaction(() => {
-        // Clear existing timetable first
-        db.prepare("DELETE FROM timetable_slots WHERE is_locked = 0").run();
+        // Rebuild the generated timetable from the class-subject mappings stored in the database.
+        db.prepare("DELETE FROM timetable_slots WHERE type IS NULL OR type != 'placement'").run();
 
         const classes = db.prepare("SELECT * FROM classes").all() as any[];
         const settings = db.prepare("SELECT * FROM settings").all() as any[];
@@ -583,7 +792,12 @@ async function startServer() {
 
   app.post("/api/timetable/clear", (req, res) => {
     try {
-      db.prepare("DELETE FROM timetable_slots").run();
+      const transaction = db.transaction(() => {
+        db.prepare("DELETE FROM timetable_slots").run();
+        db.prepare("DELETE FROM placement_classes").run();
+        db.prepare("DELETE FROM placement_blocks").run();
+      });
+      transaction();
       res.json({ success: true, message: "All timetables cleared" });
     } catch (e: any) {
       res.status(500).json({ error: e.message });

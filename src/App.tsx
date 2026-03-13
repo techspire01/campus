@@ -26,6 +26,7 @@ import StudentTimetable from './pages/StudentTimetable';
 import LabManagement from './pages/LabManagement';
 import PlacementManagement from './pages/PlacementManagement';
 import GlobalTimetables from './pages/GlobalTimetables';
+import CommonSubjects from './pages/CommonSubjects';
 
 function cn(...inputs: any[]) {
   return twMerge(clsx(inputs));
@@ -117,6 +118,7 @@ function AppContent() {
           <nav className="flex-1 space-y-2">
             <NavLink to="/admin" icon={LayoutDashboard} active={isActive('/admin')}>Admin Panel</NavLink>
             <NavLink to="/departments" icon={Building2} active={isActive('/departments') || isActive('/department')}>Departments</NavLink>
+            <NavLink to="/common" icon={BookOpen} active={isActive('/common')}>Common Subjects</NavLink>
             <NavLink to="/labs" icon={FlaskConical} active={isActive('/labs')}>Lab Management</NavLink>
             <NavLink to="/placement" icon={Briefcase} active={isActive('/placement')}>Placement Cell</NavLink>
             <NavLink to="/timetables" icon={Calendar} active={isActive('/timetables')}>Global View</NavLink>
@@ -164,6 +166,7 @@ function AppContent() {
             <Route path="/departments" element={<DepartmentsList />} />
             <Route path="/department/:id" element={<DepartmentDashboard />} />
             <Route path="/class/:id" element={<ClassDetails />} />
+            <Route path="/common" element={<CommonSubjects />} />
             <Route path="/staff/:id" element={<StaffTimetable />} />
             <Route path="/student/:id" element={<StudentTimetable />} />
             <Route path="/labs" element={<LabManagement />} />

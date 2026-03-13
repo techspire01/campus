@@ -33,6 +33,8 @@ export interface Class {
   year: number;
   semester: number;
   student_strength: number;
+  tutor_staff_id?: number | null;
+  tutor_name?: string | null;
 }
 
 export interface ClassSubject {

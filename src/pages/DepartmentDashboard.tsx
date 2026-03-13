@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Department, Class, Staff } from '../types';
-import { Plus, Users, GraduationCap, ChevronRight, BarChart3 } from 'lucide-react';
+import { Plus, GraduationCap, ChevronRight, BarChart3 } from 'lucide-react';
 import { clsx } from 'clsx';
 
 export default function DepartmentDashboard() {
@@ -10,30 +10,67 @@ export default function DepartmentDashboard() {
   const [dept, setDept] = useState<Department | null>(null);
   const [classes, setClasses] = useState<Class[]>([]);
   const [staff, setStaff] = useState<Staff[]>([]);
-  const [newClass, setNewClass] = useState({ name: '', year: 1, student_strength: 0 });
+  const [newClass, setNewClass] = useState({
+    name: '',
+    year: 1,
+    student_strength: 0,
+    tutor_staff_id: '',
+  });
+  const [status, setStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
 
   useEffect(() => {
     fetch('/api/departments').then(res => res.json()).then(data => {
-      const d = data.find((x: any) => x.id === parseInt(id!));
-      setDept(d);
+      const department = data.find((item: Department) => item.id === parseInt(id!));
+      setDept(department || null);
     });
     fetch('/api/classes').then(res => res.json()).then(data => {
-      setClasses(data.filter((x: any) => x.dept_id === parseInt(id!)));
+      setClasses(data.filter((item: Class) => item.dept_id === parseInt(id!)));
     });
     fetch('/api/staff').then(res => res.json()).then(data => {
-      setStaff(data.filter((x: any) => x.dept_id === parseInt(id!)));
+      setStaff(data.filter((item: Staff) => item.dept_id === parseInt(id!)));
     });
   }, [id]);
 
   const handleAddClass = async () => {
+    setStatus(null);
     const res = await fetch('/api/classes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...newClass, semester: 1, dept_id: parseInt(id!) })
+      body: JSON.stringify({
+        name: newClass.name,
+        year: newClass.year,
+        semester: 1,
+        student_strength: newClass.student_strength,
+        tutor_staff_id: newClass.tutor_staff_id ? parseInt(newClass.tutor_staff_id) : null,
+        dept_id: parseInt(id!),
+      })
     });
     const data = await res.json();
-    setClasses([...classes, { ...newClass, semester: 1, id: data.id, dept_id: parseInt(id!) } as Class]);
-    setNewClass({ name: '', year: 1, student_strength: 0 });
+    if (!res.ok) {
+      setStatus({ type: 'error', msg: data.error || 'Failed to save class' });
+      return;
+    }
+    setClasses(current => [...current, data as Class]);
+    setNewClass({ name: '', year: 1, student_strength: 0, tutor_staff_id: '' });
+    setStatus({ type: 'success', msg: 'Class saved to database' });
+  };
+
+  const handleTutorChange = async (classId: number, tutorStaffId: string) => {
+    setStatus(null);
+    const res = await fetch(`/api/classes/${classId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tutor_staff_id: tutorStaffId ? parseInt(tutorStaffId) : null
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setStatus({ type: 'error', msg: data.error || 'Failed to assign tutor' });
+      return;
+    }
+    setClasses(current => current.map(item => item.id === classId ? data as Class : item));
+    setStatus({ type: 'success', msg: 'Tutor assignment saved' });
   };
 
   if (!dept) return <div className="text-cyan-400 font-mono">Loading department data...</div>;
@@ -59,7 +96,6 @@ export default function DepartmentDashboard() {
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Classes Management */}
         <div className="lg:col-span-2 space-y-6">
           <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl overflow-hidden">
             <div className="bg-[#141c2e] px-6 py-4 border-b border-[#1e2d47] flex justify-between items-center">
@@ -69,46 +105,80 @@ export default function DepartmentDashboard() {
               </div>
             </div>
             <div className="p-6">
-              <div className="grid grid-cols-4 gap-2 mb-6">
-                <input 
-                  placeholder="Class Name" 
-                  className="col-span-1 bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
-                  value={newClass.name}
-                  onChange={e => setNewClass({...newClass, name: e.target.value})}
-                />
-                <select 
+              <div className="grid grid-cols-1 md:grid-cols-5 gap-2 mb-6">
+                <input
+                  placeholder="Class Name"
                   className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
-                  value={newClass.year || ''}
-                  onChange={e => setNewClass({...newClass, year: parseInt(e.target.value) || 0})}
+                  value={newClass.name}
+                  onChange={e => setNewClass({ ...newClass, name: e.target.value })}
+                />
+                <select
+                  className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                  value={newClass.year}
+                  onChange={e => setNewClass({ ...newClass, year: parseInt(e.target.value) || 1 })}
                 >
                   <option value={1}>Year 1</option>
                   <option value={2}>Year 2</option>
                   <option value={3}>Year 3</option>
                 </select>
-                <input 
+                <input
                   type="number"
-                  placeholder="Strength" 
+                  placeholder="Strength"
                   className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
                   value={newClass.student_strength || ''}
-                  onChange={e => setNewClass({...newClass, student_strength: parseInt(e.target.value) || 0})}
+                  onChange={e => setNewClass({ ...newClass, student_strength: parseInt(e.target.value) || 0 })}
                 />
+                <select
+                  className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                  value={newClass.tutor_staff_id}
+                  onChange={e => setNewClass({ ...newClass, tutor_staff_id: e.target.value })}
+                >
+                  <option value="">Assign Tutor</option>
+                  {staff.map(member => <option key={member.id} value={member.id}>{member.name}</option>)}
+                </select>
                 <button onClick={handleAddClass} className="bg-cyan-600 p-2 rounded hover:bg-cyan-500 transition-colors flex items-center justify-center gap-2 font-mono text-xs font-bold">
                   <Plus size={18} /> ADD CLASS
                 </button>
               </div>
 
+              {status && (
+                <div className={clsx(
+                  "mb-6 rounded-lg border px-4 py-3 text-xs font-mono uppercase tracking-wider",
+                  status.type === 'success'
+                    ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
+                    : "border-red-500/20 bg-red-500/10 text-red-400"
+                )}>
+                  {status.msg}
+                </div>
+              )}
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {classes.map(c => (
-                  <div 
-                    key={c.id}
-                    onClick={() => navigate(`/class/${c.id}`)}
-                    className="flex items-center justify-between p-4 bg-[#141c2e] border border-[#1e2d47] rounded-lg hover:border-cyan-500/50 cursor-pointer transition-all group"
-                  >
-                    <div>
-                      <div className="font-bold text-white group-hover:text-cyan-400 transition-colors">{c.name}</div>
-                      <div className="text-[10px] text-slate-500 font-mono">Academic Year {c.year} • {c.student_strength} Students</div>
+                {classes.map(item => (
+                  <div key={item.id} className="p-4 bg-[#141c2e] border border-[#1e2d47] rounded-lg transition-all hover:border-cyan-500/50">
+                    <button
+                      onClick={() => navigate(`/class/${item.id}`)}
+                      className="mb-4 flex w-full items-center justify-between text-left"
+                    >
+                      <div>
+                        <div className="font-bold text-white">{item.name}</div>
+                        <div className="text-[10px] text-slate-500 font-mono">Academic Year {item.year} • {item.student_strength} Students</div>
+                      </div>
+                      <ChevronRight size={18} className="text-slate-600" />
+                    </button>
+                    <div className="space-y-2">
+                      <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500">Class Tutor</div>
+                      <select
+                        className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                        value={item.tutor_staff_id || ''}
+                        onChange={e => handleTutorChange(item.id, e.target.value)}
+                      >
+                        <option value="">Not assigned</option>
+                        {staff.map(member => <option key={member.id} value={member.id}>{member.name}</option>)}
+                      </select>
+                      <div className="text-[10px] text-slate-500 font-mono">
+                        {item.tutor_name ? `Tutor: ${item.tutor_name}` : 'Tutor not assigned'}
+                      </div>
                     </div>
-                    <ChevronRight size={18} className="text-slate-600 group-hover:text-cyan-400" />
                   </div>
                 ))}
               </div>
@@ -116,7 +186,6 @@ export default function DepartmentDashboard() {
           </section>
         </div>
 
-        {/* Staff Workload Overview */}
         <div className="space-y-6">
           <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl overflow-hidden">
             <div className="bg-[#141c2e] px-6 py-4 border-b border-[#1e2d47] flex items-center gap-3">
@@ -124,27 +193,27 @@ export default function DepartmentDashboard() {
               <h2 className="font-mono font-bold text-white uppercase tracking-wider">Faculty Workload</h2>
             </div>
             <div className="p-6 space-y-4">
-              {staff.map(s => {
-                const workloadPercent = Math.min(100, (s.current_workload || 0) / s.max_workload * 100);
+              {staff.map(member => {
+                const workloadPercent = Math.min(100, ((member.current_workload || 0) / member.max_workload) * 100);
                 return (
-                  <div key={s.id} className="space-y-2">
+                  <div key={member.id} className="space-y-2">
                     <div className="flex justify-between text-sm">
-                      <span className="font-medium text-slate-300">{s.name}</span>
+                      <span className="font-medium text-slate-300">{member.name}</span>
                       <span className="font-mono text-emerald-400 text-xs">
-                        {s.current_workload || 0}h / {s.max_workload}h Max
+                        {member.current_workload || 0}h / {member.max_workload}h Max
                       </span>
                     </div>
                     <div className="h-2 bg-[#0a0e17] rounded-full overflow-hidden border border-[#1e2d47]">
-                      <div 
+                      <div
                         className={clsx(
                           "h-full transition-all duration-1000",
                           workloadPercent > 100 ? "bg-red-500" : "bg-emerald-500"
                         )}
                         style={{ width: `${workloadPercent}%` }}
-                      ></div>
+                      />
                     </div>
-                    <button 
-                      onClick={() => navigate(`/staff/${s.id}`)}
+                    <button
+                      onClick={() => navigate(`/staff/${member.id}`)}
                       className="text-[10px] font-mono text-cyan-500 hover:text-cyan-400 uppercase tracking-wider"
                     >
                       View Timetable →

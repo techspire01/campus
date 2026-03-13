@@ -6,6 +6,7 @@ export default function LabManagement() {
   const [labs, setLabs] = useState<any[]>([]);
   const [depts, setDepts] = useState<Department[]>([]);
   const [newLab, setNewLab] = useState({ name: '', dept_id: '', systems_count: 30 });
+  const [status, setStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
 
   useEffect(() => {
     fetch('/api/labs').then(res => res.json()).then(setLabs);
@@ -13,6 +14,7 @@ export default function LabManagement() {
   }, []);
 
   const handleAddLab = async () => {
+    setStatus(null);
     const res = await fetch('/api/labs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -22,8 +24,34 @@ export default function LabManagement() {
       })
     });
     const data = await res.json();
+    if (!res.ok) {
+      setStatus({ type: 'error', msg: data.error || 'Failed to create lab.' });
+      return;
+    }
+
     setLabs([...labs, { ...newLab, id: data.id } as any]);
     setNewLab({ name: '', dept_id: '', systems_count: 30 });
+    setStatus({ type: 'success', msg: 'Lab created successfully.' });
+  };
+
+  const handleDeleteLab = async (labId: number) => {
+    setStatus(null);
+
+    const shouldDelete = window.confirm('Delete this lab?');
+    if (!shouldDelete) return;
+
+    const res = await fetch(`/api/labs/${labId}`, {
+      method: 'DELETE'
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      setStatus({ type: 'error', msg: data.error || 'Failed to delete lab.' });
+      return;
+    }
+
+    setLabs(current => current.filter(lab => lab.id !== labId));
+    setStatus({ type: 'success', msg: 'Lab deleted successfully.' });
   };
 
   return (
@@ -43,6 +71,15 @@ export default function LabManagement() {
             <h2 className="font-mono font-bold text-white uppercase tracking-wider">Register New Lab</h2>
           </div>
           <div className="p-6 space-y-4">
+            {status && (
+              <div className={
+                status.type === 'success'
+                  ? 'rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300'
+                  : 'rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-300'
+              }>
+                {status.msg}
+              </div>
+            )}
             <div className="space-y-1">
               <label className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Lab Name</label>
               <input 
@@ -104,7 +141,10 @@ export default function LabManagement() {
                 <div className="flex items-center gap-2 text-emerald-400 text-xs font-mono">
                   <CheckCircle2 size={14} /> ACTIVE
                 </div>
-                <button className="text-slate-600 hover:text-red-400 transition-colors">
+                <button
+                  onClick={() => handleDeleteLab(lab.id)}
+                  className="text-slate-600 hover:text-red-400 transition-colors"
+                >
                   <Trash2 size={16} />
                 </button>
               </div>

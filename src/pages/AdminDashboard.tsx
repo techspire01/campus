@@ -57,11 +57,19 @@ export default function AdminDashboard() {
     const res = await fetch('/api/subjects', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newSubject)
+      body: JSON.stringify({
+        ...newSubject,
+        dept_id: newSubject.dept_id ? parseInt(newSubject.dept_id) : null
+      })
     });
     const data = await res.json();
-    setSubjects([...subjects, { ...newSubject, id: data.id } as Subject]);
+    if (!res.ok) {
+      setStatus({ type: 'error', msg: data.error || 'Failed to save subject' });
+      return;
+    }
+    setSubjects([...subjects, data as Subject]);
     setNewSubject({ name: '', code: '', type: 'core', dept_id: '', is_addon: false });
+    setStatus({ type: 'success', msg: 'Subject saved to database' });
   };
 
   const handleGenerateTimetable = async () => {
