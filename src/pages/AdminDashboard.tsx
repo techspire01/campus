@@ -1,12 +1,14 @@
 import { useState, useEffect } from 'react';
 import { Settings, Department, Staff, Subject } from '../types';
-import { Plus, Trash2, Save, Settings as SettingsIcon, Users, BookOpen, Building2 } from 'lucide-react';
+import { Plus, Trash2, Save, Settings as SettingsIcon, Users, BookOpen, Building2, Calendar, Loader2 } from 'lucide-react';
 
 export default function AdminDashboard() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [depts, setDepts] = useState<Department[]>([]);
   const [staff, setStaff] = useState<Staff[]>([]);
   const [subjects, setSubjects] = useState<Subject[]>([]);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [status, setStatus] = useState<{ type: 'success' | 'error', msg: string } | null>(null);
 
   const [newDept, setNewDept] = useState({ name: '', type: 'core' });
   const [newStaff, setNewStaff] = useState({ name: '', role: 'Staff', dept_id: '', max_workload: 18 });
@@ -60,6 +62,36 @@ export default function AdminDashboard() {
     const data = await res.json();
     setSubjects([...subjects, { ...newSubject, id: data.id } as Subject]);
     setNewSubject({ name: '', code: '', type: 'core', dept_id: '', is_addon: false });
+  };
+
+  const handleGenerateTimetable = async () => {
+    setIsProcessing(true);
+    setStatus(null);
+    try {
+      const res = await fetch('/api/timetable/generate', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) setStatus({ type: 'success', msg: data.message });
+      else setStatus({ type: 'error', msg: data.error || 'Generation failed' });
+    } catch (e) {
+      setStatus({ type: 'error', msg: 'Network error' });
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleClearTimetable = async () => {
+    setIsProcessing(true);
+    setStatus(null);
+    try {
+      const res = await fetch('/api/timetable/clear', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) setStatus({ type: 'success', msg: data.message });
+      else setStatus({ type: 'error', msg: data.error || 'Clear failed' });
+    } catch (e) {
+      setStatus({ type: 'error', msg: 'Network error' });
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   if (!settings) return <div className="text-cyan-400 font-mono">Loading system configuration...</div>;
@@ -249,6 +281,41 @@ export default function AdminDashboard() {
                 </div>
               ))}
             </div>
+          </div>
+        </section>
+
+        {/* Timetable Controls */}
+        <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl overflow-hidden lg:col-span-2">
+          <div className="bg-[#141c2e] px-6 py-4 border-b border-[#1e2d47] flex items-center gap-3">
+            <Calendar className="text-cyan-400" size={20} />
+            <h2 className="font-mono font-bold text-white uppercase tracking-wider">Timetable Engine Controls</h2>
+          </div>
+          <div className="p-6">
+            <div className="flex flex-col md:flex-row gap-4">
+              <button 
+                onClick={handleGenerateTimetable}
+                disabled={isProcessing}
+                className="flex-1 bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-700 text-white font-mono font-bold py-4 rounded-xl flex items-center justify-center gap-3 transition-all shadow-lg shadow-cyan-500/10"
+              >
+                {isProcessing ? <Loader2 className="animate-spin" size={20} /> : <Calendar size={20} />} 
+                GENERATE ALL TIMETABLES
+              </button>
+              <button 
+                onClick={handleClearTimetable}
+                disabled={isProcessing}
+                className="flex-1 bg-red-600/10 hover:bg-red-600/20 disabled:bg-slate-700/10 text-red-500 border border-red-500/20 font-mono font-bold py-4 rounded-xl flex items-center justify-center gap-3 transition-all"
+              >
+                {isProcessing ? <Loader2 className="animate-spin" size={20} /> : <Trash2 size={20} />} 
+                CLEAR ALL SLOTS
+              </button>
+            </div>
+            {status && (
+              <div className={`mt-4 p-4 rounded-lg font-mono text-xs uppercase tracking-widest border ${
+                status.type === 'success' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border-red-500/20 text-red-400'
+              }`}>
+                {status.msg}
+              </div>
+            )}
           </div>
         </section>
       </div>

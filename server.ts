@@ -513,8 +513,81 @@ async function startServer() {
   });
 
   app.post("/api/timetable/generate", (req, res) => {
-    // Placeholder for generation logic
-    res.json({ success: true, message: "Generation logic triggered" });
+    try {
+      const transaction = db.transaction(() => {
+        // Clear existing timetable first
+        db.prepare("DELETE FROM timetable_slots WHERE is_locked = 0").run();
+
+        const classes = db.prepare("SELECT * FROM classes").all() as any[];
+        const settings = db.prepare("SELECT * FROM settings").all() as any[];
+        const settingsMap = settings.reduce((acc, s) => ({ ...acc, [s.key]: s.value }), {} as any);
+        const periodsPerDay = parseInt(settingsMap.periods_per_day || "6");
+        const days = [1, 2, 3, 4, 5, 6];
+
+        for (const cls of classes) {
+          const classSubjects = db.prepare(`
+            SELECT cs.*, s.type as subject_type 
+            FROM class_subjects cs
+            JOIN subjects s ON cs.subject_id = s.id
+            WHERE cs.class_id = ?
+          `).all(cls.id) as any[];
+
+          // Create a pool of hours to be scheduled
+          let pool: any[] = [];
+          for (const cs of classSubjects) {
+            for (let i = 0; i < cs.hours_per_week; i++) {
+              pool.push({
+                subject_id: cs.subject_id,
+                staff_id: cs.staff_id,
+                type: cs.subject_type
+              });
+            }
+          }
+
+          // Shuffle pool for some randomness
+          pool = pool.sort(() => Math.random() - 0.5);
+
+          // Fill slots
+          let poolIndex = 0;
+          for (const day of days) {
+            for (let period = 1; period <= periodsPerDay; period++) {
+              if (poolIndex >= pool.length) break;
+
+              const item = pool[poolIndex];
+              
+              // Check if staff is available (not teaching another class at this time)
+              const staffBusy = item.staff_id ? db.prepare(`
+                SELECT 1 FROM timetable_slots 
+                WHERE staff_id = ? AND day_order = ? AND period = ?
+              `).get(item.staff_id, day, period) : null;
+
+              if (!staffBusy) {
+                db.prepare(`
+                  INSERT INTO timetable_slots (class_id, day_order, period, subject_id, staff_id, type)
+                  VALUES (?, ?, ?, ?, ?, ?)
+                `).run(cls.id, day, period, item.subject_id, item.staff_id, item.type);
+                poolIndex++;
+              }
+            }
+            if (poolIndex >= pool.length) break;
+          }
+        }
+      });
+
+      transaction();
+      res.json({ success: true, message: "Timetable generated successfully" });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/timetable/clear", (req, res) => {
+    try {
+      db.prepare("DELETE FROM timetable_slots").run();
+      res.json({ success: true, message: "All timetables cleared" });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
   // Vite middleware for development
