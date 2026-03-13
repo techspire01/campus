@@ -32,6 +32,7 @@ export interface Class {
   dept_name?: string;
   year: number;
   semester: number;
+  student_strength: number;
 }
 
 export interface ClassSubject {

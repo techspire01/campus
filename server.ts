@@ -43,6 +43,7 @@ db.exec(`
     dept_id INTEGER NOT NULL,
     year INTEGER NOT NULL,
     semester INTEGER NOT NULL,
+    student_strength INTEGER DEFAULT 0,
     FOREIGN KEY (dept_id) REFERENCES departments(id)
   );
 
@@ -244,9 +245,9 @@ async function startServer() {
   });
 
   app.post("/api/classes", (req, res) => {
-    const { name, dept_id, year, semester } = req.body;
-    const stmt = db.prepare("INSERT INTO classes (name, dept_id, year, semester) VALUES (?, ?, ?, ?)");
-    const info = stmt.run(name, dept_id, year, semester);
+    const { name, dept_id, year, semester, student_strength } = req.body;
+    const stmt = db.prepare("INSERT INTO classes (name, dept_id, year, semester, student_strength) VALUES (?, ?, ?, ?, ?)");
+    const info = stmt.run(name, dept_id, year, semester, student_strength || 0);
     res.json({ id: info.lastInsertRowid });
   });
 

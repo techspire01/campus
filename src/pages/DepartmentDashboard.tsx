@@ -10,7 +10,7 @@ export default function DepartmentDashboard() {
   const [dept, setDept] = useState<Department | null>(null);
   const [classes, setClasses] = useState<Class[]>([]);
   const [staff, setStaff] = useState<Staff[]>([]);
-  const [newClass, setNewClass] = useState({ name: '', year: 1 });
+  const [newClass, setNewClass] = useState({ name: '', year: 1, student_strength: 0 });
 
   useEffect(() => {
     fetch('/api/departments').then(res => res.json()).then(data => {
@@ -33,7 +33,7 @@ export default function DepartmentDashboard() {
     });
     const data = await res.json();
     setClasses([...classes, { ...newClass, semester: 1, id: data.id, dept_id: parseInt(id!) } as Class]);
-    setNewClass({ name: '', year: 1 });
+    setNewClass({ name: '', year: 1, student_strength: 0 });
   };
 
   if (!dept) return <div className="text-cyan-400 font-mono">Loading department data...</div>;
@@ -69,9 +69,9 @@ export default function DepartmentDashboard() {
               </div>
             </div>
             <div className="p-6">
-              <div className="grid grid-cols-3 gap-2 mb-6">
+              <div className="grid grid-cols-4 gap-2 mb-6">
                 <input 
-                  placeholder="Class Name (e.g. III CSDA)" 
+                  placeholder="Class Name" 
                   className="col-span-1 bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
                   value={newClass.name}
                   onChange={e => setNewClass({...newClass, name: e.target.value})}
@@ -85,6 +85,13 @@ export default function DepartmentDashboard() {
                   <option value={2}>Year 2</option>
                   <option value={3}>Year 3</option>
                 </select>
+                <input 
+                  type="number"
+                  placeholder="Strength" 
+                  className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                  value={newClass.student_strength || ''}
+                  onChange={e => setNewClass({...newClass, student_strength: parseInt(e.target.value) || 0})}
+                />
                 <button onClick={handleAddClass} className="bg-cyan-600 p-2 rounded hover:bg-cyan-500 transition-colors flex items-center justify-center gap-2 font-mono text-xs font-bold">
                   <Plus size={18} /> ADD CLASS
                 </button>
@@ -99,7 +106,7 @@ export default function DepartmentDashboard() {
                   >
                     <div>
                       <div className="font-bold text-white group-hover:text-cyan-400 transition-colors">{c.name}</div>
-                      <div className="text-[10px] text-slate-500 font-mono">Academic Year {c.year}</div>
+                      <div className="text-[10px] text-slate-500 font-mono">Academic Year {c.year} • {c.student_strength} Students</div>
                     </div>
                     <ChevronRight size={18} className="text-slate-600 group-hover:text-cyan-400" />
                   </div>
