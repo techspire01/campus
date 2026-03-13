@@ -186,6 +186,98 @@ async function seedDefaults() {
   }
 }
 
+async function seedLabSubjects() {
+  // Insert all lab subjects (idempotent via ON CONFLICT (code) DO NOTHING)
+  await pool.query(`
+    INSERT INTO cg_subjects (name, code, type, is_addon) VALUES
+      ('Office Automation (Lab)',           'OFFICE-AUTO-LAB',   'lab', false),
+      ('Programming in C (Lab)',            'PROG-C-LAB',        'lab', false),
+      ('Database Management System (Lab)',  'DBMS-LAB',          'lab', false),
+      ('Web Technology (Lab)',              'WEB-TECH-LAB',      'lab', false),
+      ('Accounting Software (Lab)',         'ACCT-SW-LAB',       'lab', false),
+      ('Python Programming (Lab)',          'PYTHON-LAB',        'lab', false),
+      ('Food Production (Lab)',             'FOOD-PROD-LAB',     'lab', false),
+      ('Data Structures (Lab)',             'DS-LAB',            'lab', false),
+      ('Java Programming (Lab)',            'JAVA-LAB',          'lab', false),
+      ('Machine Learning (Lab)',            'ML-LAB',            'lab', false),
+      ('Advanced Office Suite (Lab)',       'ADV-OFFICE-LAB',    'lab', false),
+      ('Digital Marketing Analytics (Lab)', 'DIG-MKTG-LAB',     'lab', false),
+      ('Big Data Analytics (Lab)',          'BIG-DATA-LAB',      'lab', false),
+      ('Advanced Data Structures (Lab)',    'ADV-DS-LAB',        'lab', false),
+      ('Advanced Java Programming (Lab)',   'ADV-JAVA-LAB',      'lab', false),
+      ('Project Lab',                       'PROJECT-LAB',       'lab', false)
+    ON CONFLICT (code) DO NOTHING
+  `);
+
+  // Assign lab subjects to classes
+  // 1st/2nd year labs = 5 hrs/week, 3rd year labs = 6 hrs/week
+  const assignments: Array<{ className: string; subjectCode: string; hours: number }> = [
+    // B.Com — no specific labs, only project lab for 3rd year
+    { className: '3 B.Com',         subjectCode: 'PROJECT-LAB',     hours: 6 },
+    // B.Com CA
+    { className: '1 B.Com CA',      subjectCode: 'OFFICE-AUTO-LAB', hours: 5 },
+    { className: '2 B.Com CA',      subjectCode: 'PROG-C-LAB',      hours: 5 },
+    { className: '2 B.Com CA',      subjectCode: 'DBMS-LAB',        hours: 5 },
+    { className: '3 B.Com CA',      subjectCode: 'WEB-TECH-LAB',    hours: 6 },
+    { className: '3 B.Com CA',      subjectCode: 'PROJECT-LAB',     hours: 6 },
+    // B.Com PA
+    { className: '3 B.Com PA',      subjectCode: 'ACCT-SW-LAB',     hours: 6 },
+    { className: '3 B.Com PA',      subjectCode: 'PROJECT-LAB',     hours: 6 },
+    // B.Com IT
+    { className: '1 B.Com IT',      subjectCode: 'PROG-C-LAB',      hours: 5 },
+    { className: '2 B.Com IT',      subjectCode: 'DBMS-LAB',        hours: 5 },
+    { className: '2 B.Com IT',      subjectCode: 'WEB-TECH-LAB',    hours: 5 },
+    { className: '3 B.Com IT',      subjectCode: 'PROJECT-LAB',     hours: 6 },
+    // BBA CA
+    { className: '1 BBA CA',        subjectCode: 'OFFICE-AUTO-LAB', hours: 5 },
+    { className: '2 BBA CA',        subjectCode: 'PYTHON-LAB',      hours: 5 },
+    { className: '3 BBA CA',        subjectCode: 'WEB-TECH-LAB',    hours: 6 },
+    { className: '3 BBA CA',        subjectCode: 'PROJECT-LAB',     hours: 6 },
+    // B.Sc CSHM
+    { className: '1 B.Sc CSHM',     subjectCode: 'FOOD-PROD-LAB',   hours: 5 },
+    { className: '2 B.Sc CSHM',     subjectCode: 'WEB-TECH-LAB',    hours: 5 },
+    { className: '3 B.Sc CSHM',     subjectCode: 'PROJECT-LAB',     hours: 6 },
+    // B.Sc CS
+    { className: '1 B.Sc CS',       subjectCode: 'PROG-C-LAB',      hours: 5 },
+    { className: '2 B.Sc CS',       subjectCode: 'DS-LAB',          hours: 5 },
+    { className: '2 B.Sc CS',       subjectCode: 'DBMS-LAB',        hours: 5 },
+    { className: '3 B.Sc CS',       subjectCode: 'JAVA-LAB',        hours: 6 },
+    { className: '3 B.Sc CS',       subjectCode: 'PROJECT-LAB',     hours: 6 },
+    // B.Sc AI & ML
+    { className: '1 B.Sc AI & ML',  subjectCode: 'PYTHON-LAB',      hours: 5 },
+    { className: '2 B.Sc AI & ML',  subjectCode: 'DS-LAB',          hours: 5 },
+    { className: '3 B.Sc AI & ML',  subjectCode: 'ML-LAB',          hours: 6 },
+    { className: '3 B.Sc AI & ML',  subjectCode: 'PROJECT-LAB',     hours: 6 },
+    // B.Sc CSDA
+    { className: '1 B.Sc CSDA',     subjectCode: 'JAVA-LAB',        hours: 5 },
+    { className: '1 B.Sc CSDA',     subjectCode: 'ADV-OFFICE-LAB',  hours: 5 },
+    { className: '2 B.Sc CSDA',     subjectCode: 'DIG-MKTG-LAB',    hours: 5 },
+    { className: '3 B.Sc CSDA',     subjectCode: 'BIG-DATA-LAB',    hours: 6 },
+    { className: '3 B.Sc CSDA',     subjectCode: 'PROJECT-LAB',     hours: 6 },
+    // B.Sc IT
+    { className: '1 B.Sc IT',       subjectCode: 'PROG-C-LAB',      hours: 5 },
+    { className: '2 B.Sc IT',       subjectCode: 'DS-LAB',          hours: 5 },
+    { className: '2 B.Sc IT',       subjectCode: 'DBMS-LAB',        hours: 5 },
+    { className: '3 B.Sc IT',       subjectCode: 'WEB-TECH-LAB',    hours: 6 },
+    { className: '3 B.Sc IT',       subjectCode: 'PROJECT-LAB',     hours: 6 },
+    // M.Sc CS
+    { className: '1 M.Sc CS',       subjectCode: 'ADV-DS-LAB',      hours: 5 },
+    { className: '1 M.Sc CS',       subjectCode: 'ADV-JAVA-LAB',    hours: 5 },
+    { className: '2 M.Sc CS',       subjectCode: 'BIG-DATA-LAB',    hours: 5 },
+  ];
+
+  for (const a of assignments) {
+    await pool.query(
+      `INSERT INTO cg_class_subjects (class_id, subject_id, hours_per_week, is_lab_required)
+       SELECT c.id, s.id, $1, true
+       FROM cg_classes c, cg_subjects s
+       WHERE c.name = $2 AND s.code = $3
+       ON CONFLICT (class_id, subject_id) DO NOTHING`,
+      [a.hours, a.className, a.subjectCode]
+    );
+  }
+}
+
 async function inTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
@@ -400,6 +492,7 @@ async function startServer() {
 
   await ensureSchema();
   await seedDefaults();
+  await seedLabSubjects();
 
   const app = express();
   app.use(express.json());
