@@ -203,6 +203,7 @@ async function inTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise
 
 type SchedulerRequest = {
   classes: number[];
+  class_details?: Array<{ id: number; dept_id: number; year: number }>;
   hours: number;
   periods_per_day: number;
   days: number[];
@@ -215,11 +216,139 @@ type SchedulerAssignment = {
   start_period: number;
   periods: number[];
   segment: 'morning' | 'afternoon';
+  group?: string;
+  subgroup?: string;
 };
 
 type SchedulerResponse =
   | { ok: true; assignments: SchedulerAssignment[] }
   | { ok: false; error: string };
+
+type PlacementGroupInfo = {
+  segment: 'morning' | 'afternoon';
+  group: string;
+  subgroup: string;
+  dayOffset: number;
+};
+
+function chunkEvenly<T>(values: T[], chunkCount: number): T[][] {
+  if (chunkCount <= 0) {
+    return [];
+  }
+
+  const baseSize = Math.floor(values.length / chunkCount);
+  const remainder = values.length % chunkCount;
+  const chunks: T[][] = [];
+  let start = 0;
+
+  for (let index = 0; index < chunkCount; index++) {
+    const size = baseSize + (index < remainder ? 1 : 0);
+    if (size <= 0) {
+      continue;
+    }
+    chunks.push(values.slice(start, start + size));
+    start += size;
+  }
+
+  return chunks;
+}
+
+function nextBucketWithCapacity(startIndex: number, buckets: Array<PlacementGroupInfo & { capacity: number }>): number {
+  for (let offset = 0; offset < buckets.length; offset++) {
+    const idx = (startIndex + offset) % buckets.length;
+    if (buckets[idx].capacity > 0) {
+      return idx;
+    }
+  }
+
+  throw new Error('No bucket capacity remaining for placement grouping');
+}
+
+function assignPlacementGroups(
+  classEntries: Array<{ id: number; dept_id: number; year: number }>,
+  days: number[]
+): Record<number, PlacementGroupInfo> {
+  const sorted = [...classEntries].sort((a, b) => a.id - b.id);
+  const result: Record<number, PlacementGroupInfo> = {};
+  const targetClassesPerSubgroup = 2;
+  const maxCombinations = 3;
+
+  const morningCount = Math.floor(sorted.length / 2);
+  const afternoonCount = sorted.length - morningCount;
+
+  const buildBuckets = (count: number, segment: 'morning' | 'afternoon', group: string) => {
+    if (count <= 0) {
+      return [] as Array<PlacementGroupInfo & { capacity: number }>;
+    }
+
+    const subgroupCount = Math.min(maxCombinations, Math.max(1, Math.ceil(count / targetClassesPerSubgroup)));
+    const subgroupSizes = chunkEvenly(Array.from({ length: count }, (_, i) => i), subgroupCount).map(chunk => chunk.length);
+    return subgroupSizes.map((size, subgroupIndex) => ({
+      segment,
+      group,
+      subgroup: `${group}${subgroupIndex + 1}`,
+      dayOffset: subgroupIndex,
+      capacity: size
+    }));
+  };
+
+  const buckets = [...buildBuckets(morningCount, 'morning', 'A'), ...buildBuckets(afternoonCount, 'afternoon', 'B')];
+  const yearMap = new Map<number, Array<{ id: number; dept_id: number }>>();
+  sorted.forEach(entry => {
+    const existing = yearMap.get(entry.year) || [];
+    existing.push({ id: entry.id, dept_id: entry.dept_id });
+    yearMap.set(entry.year, existing);
+  });
+
+  const uniqueDayOffsets = [...new Set(buckets.map(bucket => bucket.dayOffset))].sort((a, b) => a - b);
+  let yearPointer = 0;
+
+  for (const year of [...yearMap.keys()].sort((a, b) => a - b)) {
+    const entries = yearMap.get(year) || [];
+    const preferredOffset = uniqueDayOffsets.length > 0 ? uniqueDayOffsets[yearPointer % uniqueDayOffsets.length] : 0;
+    const deptMap = new Map<number, number[]>();
+
+    entries.forEach(entry => {
+      const ids = deptMap.get(entry.dept_id) || [];
+      ids.push(entry.id);
+      deptMap.set(entry.dept_id, ids);
+    });
+
+    let localPointer = 0;
+    for (const deptId of [...deptMap.keys()].sort((a, b) => a - b)) {
+      const ids = deptMap.get(deptId) || [];
+      ids.forEach(classId => {
+        const prioritized = buckets
+          .map((bucket, index) => ({ ...bucket, index }))
+          .filter(bucket => bucket.capacity > 0)
+          .sort((left, right) => {
+            const leftYearPenalty = left.dayOffset === preferredOffset ? 0 : 1;
+            const rightYearPenalty = right.dayOffset === preferredOffset ? 0 : 1;
+            if (leftYearPenalty !== rightYearPenalty) return leftYearPenalty - rightYearPenalty;
+
+            const leftPointerPenalty = (left.index - localPointer + buckets.length) % buckets.length;
+            const rightPointerPenalty = (right.index - localPointer + buckets.length) % buckets.length;
+            return leftPointerPenalty - rightPointerPenalty;
+          });
+
+        const chosen = prioritized[0];
+        const bucket = buckets[chosen.index];
+        result[classId] = {
+          segment: bucket.segment,
+          group: bucket.group,
+          subgroup: bucket.subgroup,
+          dayOffset: bucket.dayOffset
+        };
+        bucket.capacity -= 1;
+        localPointer = (chosen.index + 1) % buckets.length;
+      });
+    }
+
+    yearPointer += 1;
+  }
+
+  return result;
+}
 
 function runPlacementScheduler(payload: SchedulerRequest): Promise<SchedulerResponse> {
   return new Promise((resolve, reject) => {
@@ -769,8 +898,9 @@ async function startServer() {
       const result = [] as any[];
       for (const block of blocks.rows) {
         const classes = await pool.query(
-          `SELECT c.* FROM cg_classes c
+          `SELECT c.*, d.name AS dept_name FROM cg_classes c
            JOIN cg_placement_classes pc ON c.id = pc.class_id
+           JOIN cg_departments d ON d.id = c.dept_id
            WHERE pc.placement_id = $1`,
           [block.id]
         );
@@ -839,10 +969,15 @@ async function startServer() {
 
         const block = blockRows.rows[0] as { id: number; hours: number };
         const classRows = await client.query(
-          'SELECT class_id FROM cg_placement_classes WHERE placement_id = $1 ORDER BY class_id',
+          `SELECT pc.class_id, c.dept_id, c.year
+           FROM cg_placement_classes pc
+           JOIN cg_classes c ON c.id = pc.class_id
+           WHERE pc.placement_id = $1
+           ORDER BY pc.class_id`,
           [blockId]
         );
-        const classIds = classRows.rows.map((r: { class_id: number }) => r.class_id);
+        const classDetails = classRows.rows as Array<{ class_id: number; dept_id: number; year: number }>;
+        const classIds = classDetails.map(r => r.class_id);
         if (classIds.length === 0) {
           throw new Error('No classes assigned to this placement block');
         }
@@ -878,6 +1013,7 @@ async function startServer() {
 
         const schedule = await runPlacementScheduler({
           classes: classIds,
+          class_details: classDetails.map(item => ({ id: item.class_id, dept_id: item.dept_id, year: item.year })),
           hours: Number(block.hours),
           periods_per_day: periodsPerDay,
           days: [1, 2, 3, 4, 5, 6],
@@ -927,10 +1063,15 @@ async function startServer() {
         }
 
         const classRows = await client.query(
-          'SELECT class_id FROM cg_placement_classes WHERE placement_id = $1 ORDER BY class_id',
+          `SELECT pc.class_id, c.dept_id, c.year
+           FROM cg_placement_classes pc
+           JOIN cg_classes c ON c.id = pc.class_id
+           WHERE pc.placement_id = $1
+           ORDER BY pc.class_id`,
           [blockId]
         );
-        const classIds = classRows.rows.map((r: { class_id: number }) => r.class_id);
+        const classDetails = classRows.rows as Array<{ class_id: number; dept_id: number; year: number }>;
+        const classIds = classDetails.map(r => r.class_id);
         if (classIds.length === 0) {
           throw new Error('No classes assigned to this placement block');
         }
@@ -977,29 +1118,38 @@ async function startServer() {
           grouped.set(key, values);
         }
 
+        const groupInfo = assignPlacementGroups(
+          classDetails.map(item => ({ id: item.class_id, dept_id: item.dept_id, year: item.year })),
+          [1, 2, 3, 4, 5, 6]
+        );
+
         const assignments: Array<{
           class_id: number;
           day_order: number;
           start_period: number;
           periods: number[];
           segment: 'morning' | 'afternoon';
+          group?: string;
+          subgroup?: string;
         }> = [];
 
-        const split = Math.floor(periodsPerDay / 2);
         for (const [key, periods] of grouped.entries()) {
           const [classIdRaw, dayRaw] = key.split('-');
           const classId = Number(classIdRaw);
           const dayOrder = Number(dayRaw);
           periods.sort((a, b) => a - b);
           if (periods.length === 0) continue;
-          const segment: 'morning' | 'afternoon' = periods[0] <= split ? 'morning' : 'afternoon';
+          const info = groupInfo[classId];
+          const segment: 'morning' | 'afternoon' = info?.segment || (periods[0] <= Math.floor(periodsPerDay / 2) ? 'morning' : 'afternoon');
 
           assignments.push({
             class_id: classId,
             day_order: dayOrder,
             start_period: periods[0],
             periods,
-            segment
+            segment,
+            group: info?.group,
+            subgroup: info?.subgroup
           });
         }
 

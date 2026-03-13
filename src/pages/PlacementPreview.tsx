@@ -10,7 +10,7 @@ import {
   useSensor,
   useSensors
 } from '@dnd-kit/core';
-import { ArrowLeft, GripVertical, Lock } from 'lucide-react';
+import { ArrowLeft, GripVertical, Lock, LoaderCircle, Filter } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useNavigate, useParams } from 'react-router-dom';
 
@@ -22,6 +22,8 @@ type PreviewAssignment = {
   start_period: number;
   periods: number[];
   segment: 'morning' | 'afternoon';
+  group?: string;
+  subgroup?: string;
 };
 
 type PreviewPayload = {
@@ -104,6 +106,10 @@ export default function PlacementPreview() {
   const [periodsPerDay, setPeriodsPerDay] = useState(6);
   const [hours, setHours] = useState(2);
   const [activeDrag, setActiveDrag] = useState<ActiveDrag>(null);
+  const [isLoadingPage, setIsLoadingPage] = useState(true);
+  const [isFixingSlots, setIsFixingSlots] = useState(false);
+  const [filterDept, setFilterDept] = useState<number | 'all'>('all');
+  const [filterYear, setFilterYear] = useState<number | 'all'>('all');
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -177,10 +183,15 @@ export default function PlacementPreview() {
 
   useEffect(() => {
     if (!resolvedBlockId) return;
-    loadPage().catch((e: any) => {
-      alert(e.message || 'Failed to open preview page');
-      navigate('/placement');
-    });
+    setIsLoadingPage(true);
+    loadPage()
+      .catch((e: any) => {
+        alert(e.message || 'Failed to open preview page');
+        navigate('/placement');
+      })
+      .finally(() => {
+        setIsLoadingPage(false);
+      });
   }, [resolvedBlockId]);
 
   const handleDragStart = (event: DragStartEvent) => {
@@ -231,31 +242,56 @@ export default function PlacementPreview() {
   };
 
   const handleFixSlots = async () => {
-    const res = await fetch(`/api/placement/blocks/${resolvedBlockId}/fix-slots`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ assignments })
-    });
+    setIsFixingSlots(true);
 
-    if (!res.ok) {
-      let message = 'Failed to fix placement slots';
-      try {
-        const err = await res.json();
-        message = err.error || message;
-      } catch {
-        // keep default
+    try {
+      const res = await fetch(`/api/placement/blocks/${resolvedBlockId}/fix-slots`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assignments })
+      });
+
+      if (!res.ok) {
+        let message = 'Failed to fix placement slots';
+        try {
+          const err = await res.json();
+          message = err.error || message;
+        } catch {
+          // keep default
+        }
+        alert(message);
+        return;
       }
-      alert(message);
-      return;
-    }
 
-    alert('Slots fixed and moved to main timetable. Preview cleared.');
-    navigate('/placement');
+      alert('Slots fixed and moved to main timetable. Preview cleared.');
+      navigate('/placement');
+    } finally {
+      setIsFixingSlots(false);
+    }
   };
 
-  if (!block) {
-    return <div className="text-cyan-400 font-mono">Loading placement preview...</div>;
+  if (isLoadingPage || !block) {
+    return (
+      <div className="min-h-[50vh] flex items-center justify-center">
+        <div className="flex items-center gap-3 px-5 py-4 rounded-xl border border-cyan-500/20 bg-cyan-500/5 text-cyan-300 font-mono text-sm uppercase tracking-wider">
+          <LoaderCircle size={18} className="animate-spin" />
+          Loading placement preview...
+        </div>
+      </div>
+    );
   }
+
+  const departmentOptions = [...new Map<number, string>((block.classes || []).map((cls: Class) => [cls.dept_id, cls.dept_name || `Dept ${cls.dept_id}`])).entries()]
+    .map(([id, name]) => ({ id, name }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+  const yearOptions = [...new Set<number>((block.classes || []).map((cls: Class) => cls.year))].sort((a, b) => a - b);
+
+  const filteredClasses = (block.classes || []).filter((cls: Class) => {
+    const deptMatch = filterDept === 'all' || cls.dept_id === filterDept;
+    const yearMatch = filterYear === 'all' || cls.year === filterYear;
+    return deptMatch && yearMatch;
+  });
 
   return (
     <div className="space-y-6">
@@ -269,15 +305,55 @@ export default function PlacementPreview() {
         </div>
         <button
           onClick={handleFixSlots}
+          disabled={isFixingSlots}
           className="px-4 py-2 bg-cyan-700 hover:bg-cyan-600 text-white text-xs font-mono uppercase rounded-lg flex items-center gap-1"
         >
-          <Lock size={14} /> Fix Slots
+          {isFixingSlots ? <LoaderCircle size={14} className="animate-spin" /> : <Lock size={14} />}
+          {isFixingSlots ? 'Fixing Slots...' : 'Fix Slots'}
         </button>
       </header>
 
+      <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl p-4">
+        <div className="flex items-center gap-2 mb-3 text-[10px] font-mono text-slate-500 uppercase tracking-widest">
+          <Filter size={12} /> Filter Preview
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <label className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Department View</label>
+            <select
+              value={filterDept}
+              onChange={event => setFilterDept(event.target.value === 'all' ? 'all' : parseInt(event.target.value, 10))}
+              className="w-full bg-[#141c2e] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+            >
+              <option value="all">All Departments</option>
+              {departmentOptions.map(option => (
+                <option key={option.id} value={option.id}>
+                  {option.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Year View</label>
+            <select
+              value={filterYear}
+              onChange={event => setFilterYear(event.target.value === 'all' ? 'all' : parseInt(event.target.value, 10))}
+              className="w-full bg-[#141c2e] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+            >
+              <option value="all">All Years</option>
+              {yearOptions.map(year => (
+                <option key={year} value={year}>
+                  Year {year}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </section>
+
       <DndContext sensors={sensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-          {block.classes?.map((cls: Class) => {
+          {filteredClasses.map((cls: Class) => {
             const assignment = assignments.find(a => a.class_id === cls.id);
             if (!assignment) return null;
 
@@ -286,7 +362,11 @@ export default function PlacementPreview() {
               <section key={`grid-${cls.id}`} className="bg-[#0a0e17] border border-[#1e2d47] rounded-lg p-3 space-y-2">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-mono text-cyan-400 uppercase tracking-wider">{cls.name}</h3>
-                  <span className="text-[10px] font-mono text-slate-500 uppercase">{assignment.segment} block</span>
+                  <span className="text-[10px] font-mono text-slate-500 uppercase">
+                    {assignment.segment}
+                    {assignment.group ? ` - group ${assignment.group}` : ''}
+                    {assignment.subgroup ? ` / ${assignment.subgroup}` : ''}
+                  </span>
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full border-collapse min-w-[520px]">
@@ -340,6 +420,12 @@ export default function PlacementPreview() {
             );
           })}
         </div>
+
+        {filteredClasses.length === 0 && (
+          <div className="rounded-xl border border-dashed border-[#1e2d47] p-10 text-center text-slate-500 font-mono uppercase tracking-wider text-xs">
+            No classes match the selected department and year filters.
+          </div>
+        )}
 
         <DragOverlay>
           {activeDrag ? (

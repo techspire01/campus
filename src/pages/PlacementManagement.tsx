@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Briefcase, Plus, CheckSquare, Square, Trash2, Filter, Sparkles } from 'lucide-react';
+import { Briefcase, Plus, CheckSquare, Square, Trash2, Filter, Sparkles, LoaderCircle, X } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Class, Department } from '../types';
 
@@ -10,6 +10,10 @@ export default function PlacementManagement() {
   const [selectedClasses, setSelectedClasses] = useState<number[]>([]);
   const [hours, setHours] = useState(3);
   const [placementBlocks, setPlacementBlocks] = useState<any[]>([]);
+  const [isAddingBlock, setIsAddingBlock] = useState(false);
+  const [loadingPreviewBlockId, setLoadingPreviewBlockId] = useState<number | null>(null);
+  const [deletingBlockId, setDeletingBlockId] = useState<number | null>(null);
+  const [removingClassKey, setRemovingClassKey] = useState<string | null>(null);
 
   const [filterYear, setFilterYear] = useState<number | 'all'>('all');
   const [filterDept, setFilterDept] = useState<number | 'all'>('all');
@@ -36,57 +40,68 @@ export default function PlacementManagement() {
 
   const handleAddPlacement = async () => {
     if (selectedClasses.length === 0) return;
+    setIsAddingBlock(true);
 
-    const res = await fetch('/api/placement/blocks', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: 'Placement Training',
-        hours,
-        class_ids: selectedClasses
-      })
-    });
+    try {
+      const res = await fetch('/api/placement/blocks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Placement Training',
+          hours,
+          class_ids: selectedClasses
+        })
+      });
 
-    if (res.ok) {
-      fetch('/api/placement/blocks').then(response => response.json()).then(setPlacementBlocks);
-      setSelectedClasses([]);
-      alert('Placement block added successfully. Click Generate Placement Timetable to open preview page.');
-    } else {
-      let message = 'Failed to add placement block';
-      try {
-        const err = await res.json();
-        message = err.error || message;
-      } catch {
-        // keep default message
+      if (res.ok) {
+        fetch('/api/placement/blocks').then(response => response.json()).then(setPlacementBlocks);
+        setSelectedClasses([]);
+        alert('Placement block added successfully. Click Generate Placement Timetable to open preview page.');
+      } else {
+        let message = 'Failed to add placement block';
+        try {
+          const err = await res.json();
+          message = err.error || message;
+        } catch {
+          // keep default message
+        }
+        alert(message);
       }
-      alert(message);
+    } finally {
+      setIsAddingBlock(false);
     }
   };
 
   const handleGeneratePreview = async (blockId: number) => {
-    const res = await fetch(`/api/placement/blocks/${blockId}/generate-preview`, {
-      method: 'POST'
-    });
+    setLoadingPreviewBlockId(blockId);
 
-    if (!res.ok) {
-      let message = 'Failed to generate placement timetable preview';
-      try {
-        const err = await res.json();
-        message = err.error || `${message} (HTTP ${res.status})`;
-      } catch {
+    try {
+      const res = await fetch(`/api/placement/blocks/${blockId}/generate-preview`, {
+        method: 'POST'
+      });
+
+      if (!res.ok) {
+        let message = 'Failed to generate placement timetable preview';
         try {
-          const text = await res.text();
-          message = text ? `${message}: ${text}` : `${message} (HTTP ${res.status})`;
+          const err = await res.json();
+          message = err.error || `${message} (HTTP ${res.status})`;
         } catch {
-          message = `${message} (HTTP ${res.status})`;
+          try {
+            const text = await res.text();
+            message = text ? `${message}: ${text}` : `${message} (HTTP ${res.status})`;
+          } catch {
+            message = `${message} (HTTP ${res.status})`;
+          }
         }
+        alert(message);
+        return;
       }
-      alert(message);
-      return;
-    }
 
-    fetch('/api/placement/blocks').then(response => response.json()).then(setPlacementBlocks);
-    navigate(`/placement/preview/${blockId}`);
+      fetch('/api/placement/blocks').then(response => response.json()).then(setPlacementBlocks);
+      navigate(`/placement/preview/${blockId}`);
+    } finally {
+      setLoadingPreviewBlockId(null);
+    }
   };
 
   const handleOpenPreview = (blockId: number) => {
@@ -94,38 +109,49 @@ export default function PlacementManagement() {
   };
 
   const handleDeleteBlock = async (id: number) => {
-    const res = await fetch(`/api/placement/blocks/${id}`, {
-      method: 'DELETE'
-    });
-    if (res.ok) {
-      fetch('/api/placement/blocks').then(response => response.json()).then(setPlacementBlocks);
-    } else {
-      let message = 'Failed to delete placement block';
-      try {
-        const err = await res.json();
-        message = err.error || message;
-      } catch {
-        // keep default message
+    setDeletingBlockId(id);
+    try {
+      const res = await fetch(`/api/placement/blocks/${id}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        fetch('/api/placement/blocks').then(response => response.json()).then(setPlacementBlocks);
+      } else {
+        let message = 'Failed to delete placement block';
+        try {
+          const err = await res.json();
+          message = err.error || message;
+        } catch {
+          // keep default message
+        }
+        alert(message);
       }
-      alert(message);
+    } finally {
+      setDeletingBlockId(null);
     }
   };
 
   const handleRemoveClassFromBlock = async (blockId: number, classId: number) => {
-    const res = await fetch(`/api/placement/blocks/${blockId}/classes/${classId}`, {
-      method: 'DELETE'
-    });
-    if (res.ok) {
-      fetch('/api/placement/blocks').then(response => response.json()).then(setPlacementBlocks);
-    } else {
-      let message = 'Failed to remove class from placement block';
-      try {
-        const err = await res.json();
-        message = err.error || message;
-      } catch {
-        // keep default message
+    const requestKey = `${blockId}-${classId}`;
+    setRemovingClassKey(requestKey);
+    try {
+      const res = await fetch(`/api/placement/blocks/${blockId}/classes/${classId}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        fetch('/api/placement/blocks').then(response => response.json()).then(setPlacementBlocks);
+      } else {
+        let message = 'Failed to remove class from placement block';
+        try {
+          const err = await res.json();
+          message = err.error || message;
+        } catch {
+          // keep default message
+        }
+        alert(message);
       }
-      alert(message);
+    } finally {
+      setRemovingClassKey(null);
     }
   };
 
@@ -237,9 +263,11 @@ export default function PlacementManagement() {
 
             <button
               onClick={handleAddPlacement}
+              disabled={isAddingBlock}
               className="w-full bg-cyan-700 hover:bg-cyan-600 text-white font-mono font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-all"
             >
-              <Plus size={18} /> Add Placement Block
+              {isAddingBlock ? <LoaderCircle size={18} className="animate-spin" /> : <Plus size={18} />}
+              {isAddingBlock ? 'Adding Placement Block...' : 'Add Placement Block'}
             </button>
           </div>
         </section>
@@ -261,10 +289,15 @@ export default function PlacementManagement() {
                       {c.name}
                       <button
                         onClick={() => handleRemoveClassFromBlock(block.id, c.id)}
+                        disabled={removingClassKey === `${block.id}-${c.id}`}
                         className="text-red-400 hover:text-red-300 opacity-0 group-hover:opacity-100 transition-opacity"
                         title="Remove class from block"
                       >
-                        ×
+                        {removingClassKey === `${block.id}-${c.id}` ? (
+                          <LoaderCircle size={12} className="animate-spin" />
+                        ) : (
+                          <X size={12} />
+                        )}
                       </button>
                     </div>
                   ))}
@@ -277,9 +310,15 @@ export default function PlacementManagement() {
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => handleGeneratePreview(block.id)}
+                      disabled={loadingPreviewBlockId === block.id}
                       className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-mono uppercase rounded-lg flex items-center gap-1"
                     >
-                      <Sparkles size={13} /> Generate Placement Timetable
+                      {loadingPreviewBlockId === block.id ? (
+                        <LoaderCircle size={13} className="animate-spin" />
+                      ) : (
+                        <Sparkles size={13} />
+                      )}
+                      {loadingPreviewBlockId === block.id ? 'Generating...' : 'Generate Placement Timetable'}
                     </button>
                     {block.has_preview && (
                       <button
@@ -291,10 +330,15 @@ export default function PlacementManagement() {
                     )}
                     <button
                       onClick={() => handleDeleteBlock(block.id)}
+                      disabled={deletingBlockId === block.id}
                       className="text-slate-600 hover:text-red-400 transition-colors p-2 hover:bg-red-400/10 rounded-lg"
                       title="Delete block and clear slots"
                     >
-                      <Trash2 size={18} />
+                      {deletingBlockId === block.id ? (
+                        <LoaderCircle size={18} className="animate-spin" />
+                      ) : (
+                        <Trash2 size={18} />
+                      )}
                     </button>
                   </div>
                 </div>
