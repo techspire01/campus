@@ -46,6 +46,49 @@ def has_any(text: str, words: list[str]) -> bool:
     return any(w in text for w in words)
 
 
+def normalize_text(value: str) -> str:
+    if value is None:
+        return ""
+    return "".join(ch for ch in str(value).lower() if ch.isalnum())
+
+
+def preferred_lab_name_tokens_for_dept(dept_name: str) -> list[str]:
+    dept = normalize_text(dept_name)
+    if not dept:
+        return []
+
+    # Department-specific preferred labs.
+    if "csda" in dept:
+        return ["labb", "lab2", "csdalabb", "csdalab2"]
+
+    # Check CS after CSDA so CSDA is not accidentally matched as CS.
+    if dept == "cs" or dept.startswith("cs"):
+        return ["laba", "lab1", "cslaba", "cslab1"]
+
+    return []
+
+
+def lab_preference_penalty(req: dict, lab: dict) -> int:
+    req_dept = normalize_text(req.get("class_dept_name") or "")
+    lab_name = normalize_text(lab.get("name") or "")
+    lab_dept = normalize_text(lab.get("dept_name") or "")
+
+    if not req_dept:
+        return 2
+
+    preferred_tokens = preferred_lab_name_tokens_for_dept(req_dept)
+    if preferred_tokens and any(tok in lab_name for tok in preferred_tokens):
+        return 0
+
+    if lab_dept and req_dept == lab_dept:
+        return 1
+
+    if req_dept and req_dept in lab_name:
+        return 2
+
+    return 4
+
+
 def tool_requirements(req_text: str) -> list[list[str]]:
     # Each inner list is an OR-group; all groups must be satisfied.
     groups: list[list[str]] = []
@@ -147,11 +190,19 @@ def solve(data: dict) -> dict:
             lab_blocked[lab_id] = to_blocked_map(slots)
 
     compatible_labs: dict[int, list[int]] = {}
+    req_by_id: dict[int, dict] = {}
     for req in requirements:
         req_id = safe_int(req.get("id"), 0)
         if req_id < 1:
             continue
+        req_by_id[req_id] = req
         compatible_labs[req_id] = [safe_int(l.get("id"), 0) for l in labs if safe_int(l.get("id"), 0) >= 1 and lab_matches(req, l)]
+
+    lab_by_id: dict[int, dict] = {}
+    for lab in labs:
+        lab_id = safe_int(lab.get("id"), 0)
+        if lab_id >= 1:
+            lab_by_id[lab_id] = lab
 
     print(f"Total requirements: {len(requirements)}", file=sys.stderr)
     print(f"Total labs: {len(labs)}", file=sys.stderr)
@@ -315,8 +366,11 @@ def solve(data: dict) -> dict:
     objective_terms = []
     for s in sessions:
         sid = s["session_id"]
+        req = req_by_id.get(s["req_id"], {})
         for lab_id, day, start in session_candidates[sid]:
-            score = day * 100 + start
+            lab = lab_by_id.get(lab_id, {})
+            preference_penalty = lab_preference_penalty(req, lab)
+            score = day * 100 + start + (preference_penalty * 1000)
             objective_terms.append(assign[(sid, lab_id, day, start)] * score)
     model.Maximize(sum(reward_terms) - sum(objective_terms))
 

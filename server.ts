@@ -218,6 +218,8 @@ type LabSchedulerRequest = {
     subject_id: number;
     subject_name?: string;
     subject_code?: string;
+    class_dept_id?: number | null;
+    class_dept_name?: string | null;
     class_strength: number;
     lab_hours: number;
     requirements: string | null;
@@ -228,6 +230,8 @@ type LabSchedulerRequest = {
     os_installed: string | null;
     system_spec: string | null;
     name: string;
+    dept_id?: number | null;
+    dept_name?: string | null;
   }>;
   periods_per_day: number;
   days: number[];
@@ -1100,19 +1104,23 @@ async function startServer() {
           lr.subject_id,
           s.name AS subject_name,
           s.code AS subject_code,
+          c.dept_id AS class_dept_id,
+          d.name AS class_dept_name,
           COALESCE(lr.duration, cs.hours_per_week) AS lab_hours,
           lr.requirements,
           c.student_strength
         FROM cg_lab_requirements lr
         JOIN cg_classes c ON c.id = lr.class_id
+        LEFT JOIN cg_departments d ON d.id = c.dept_id
         JOIN cg_class_subjects cs ON cs.class_id = lr.class_id AND cs.subject_id = lr.subject_id
         JOIN cg_subjects s ON s.id = lr.subject_id
         WHERE lr.status IN ('pending', 'assigned')
       `);
 
       const labRows = await pool.query(`
-        SELECT id, name, systems_count, os_installed, systems_specification
-        FROM cg_labs
+        SELECT l.id, l.name, l.dept_id, d.name AS dept_name, l.systems_count, l.os_installed, l.systems_specification
+        FROM cg_labs l
+        LEFT JOIN cg_departments d ON d.id = l.dept_id
       `);
 
       if ((reqRows.rowCount ?? 0) === 0) {
@@ -1153,6 +1161,8 @@ async function startServer() {
           subject_id: toInt(r.subject_id, 'lab_requirement.subject_id'),
           subject_name: r.subject_name,
           subject_code: r.subject_code,
+          class_dept_id: r.class_dept_id != null ? toInt(r.class_dept_id, 'class.dept_id') : null,
+          class_dept_name: r.class_dept_name,
           class_strength: toInt(r.student_strength || 0, 'class.student_strength'),
           lab_hours: toInt(r.lab_hours || 1, 'lab_requirement.lab_hours'),
           requirements: r.requirements,
@@ -1163,6 +1173,8 @@ async function startServer() {
           os_installed: r.os_installed,
           system_spec: r.systems_specification,
           name: r.name,
+          dept_id: r.dept_id != null ? toInt(r.dept_id, 'lab.dept_id') : null,
+          dept_name: r.dept_name,
         })),
         periods_per_day: periodsPerDay,
         days,
@@ -1270,6 +1282,7 @@ async function startServer() {
           class_id: number;
           lab_id: number;
           preview_group: string;
+          lab_requirement_id: number;
         };
 
         const groupRows = await client.query(
@@ -1295,16 +1308,18 @@ async function startServer() {
           const classConflict = await client.query(
             `SELECT 1 FROM cg_lab_preview_slots
              WHERE class_id = $1 AND day_order = $2 AND period = $3 AND status = 'preview' AND id <> $4
+               AND NOT (lab_requirement_id = $5 AND preview_group = $6)
              LIMIT 1`,
-            [source.class_id, Number(to_day), newPeriod, r.id]
+            [source.class_id, Number(to_day), newPeriod, r.id, source.lab_requirement_id, source.preview_group]
           );
           if ((classConflict.rowCount ?? 0) > 0) throw new Error('Class conflict in preview slots.');
 
           const labConflict = await client.query(
             `SELECT 1 FROM cg_lab_preview_slots
              WHERE lab_id = $1 AND day_order = $2 AND period = $3 AND status = 'preview' AND id <> $4
+               AND NOT (lab_requirement_id = $5 AND preview_group = $6)
              LIMIT 1`,
-            [targetLabId, Number(to_day), newPeriod, r.id]
+            [targetLabId, Number(to_day), newPeriod, r.id, source.lab_requirement_id, source.preview_group]
           );
           if ((labConflict.rowCount ?? 0) > 0) throw new Error('Lab conflict in preview slots.');
 

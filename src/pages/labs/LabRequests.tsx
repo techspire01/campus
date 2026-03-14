@@ -177,11 +177,13 @@ export default function LabRequests() {
     setStatus({ type: 'success', msg: 'Preview slot moved.' });
   };
 
-  const handleDropOnRow = async (target: LabPreviewSlot) => {
-    if (!draggingRowId || draggingRowId === target.id) return;
-    const source = preview.find(p => p.id === draggingRowId);
-    if (!source) return;
-
+  const movePreviewSlot = async (
+    source: LabPreviewSlot,
+    toDay: number,
+    toPeriod: number,
+    toLabId: number,
+    successMessage: string,
+  ) => {
     setMovingId(source.id);
     setStatus(null);
     const res = await fetch('/api/labs/preview/move', {
@@ -191,21 +193,30 @@ export default function LabRequests() {
         lab_requirement_id: source.lab_requirement_id,
         from_day: source.day_order,
         from_period: source.period,
-        to_day: target.day_order,
-        to_period: target.period,
-        to_lab_id: target.lab_id,
+        to_day: toDay,
+        to_period: toPeriod,
+        to_lab_id: toLabId,
       })
     });
     const data = await res.json();
     setMovingId(null);
-    setDraggingRowId(null);
     if (!res.ok) {
       setStatus({ type: 'error', msg: data.error || 'Failed to move preview slot.' });
       return;
     }
     await loadPreview();
     if (showScheduleGrid) await loadAllLabSlots();
-    setStatus({ type: 'success', msg: 'Preview slot moved by drag-and-drop.' });
+    setStatus({ type: 'success', msg: successMessage });
+  };
+
+  const handleDropOnRow = async (target: LabPreviewSlot, sourceId?: number) => {
+    const dragId = sourceId ?? draggingRowId;
+    if (!dragId || dragId === target.id) return;
+    const source = preview.find(p => p.id === dragId);
+    if (!source) return;
+
+    await movePreviewSlot(source, target.day_order, target.period, target.lab_id, 'Preview slot moved by drag-and-drop.');
+    setDraggingRowId(null);
   };
 
   const gridSource: LabGridSlot[] = preview.length > 0
@@ -400,11 +411,18 @@ export default function LabRequests() {
                     <tr
                       key={row.id}
                       draggable
-                      onDragStart={() => setDraggingRowId(row.id)}
+                      onDragStart={e => {
+                        setDraggingRowId(row.id);
+                        e.dataTransfer.setData('text/plain', String(row.id));
+                        e.dataTransfer.effectAllowed = 'move';
+                      }}
+                      onDragEnd={() => setDraggingRowId(null)}
                       onDragOver={e => e.preventDefault()}
                       onDrop={async e => {
                         e.preventDefault();
-                        await handleDropOnRow(row);
+                        const droppedId = Number(e.dataTransfer.getData('text/plain'));
+                        const sourceId = Number.isFinite(droppedId) && droppedId > 0 ? droppedId : undefined;
+                        await handleDropOnRow(row, sourceId);
                       }}
                       className={`border-b border-[#1e2d47]/40 ${draggingRowId === row.id ? 'opacity-40' : ''}`}
                     >
@@ -532,54 +550,27 @@ export default function LabRequests() {
                                   }}
                                   onDrop={async e => {
                                     e.preventDefault();
-                                    if (!draggingRowId || preview.length === 0) return;
-                                    const target = {
-                                      id: -1,
-                                      lab_requirement_id: slot?.lab_requirement_id || preview.find(p => p.id === draggingRowId)?.lab_requirement_id || 0,
-                                      class_id: slot?.class_id || 0,
-                                      class_name: slot?.class_name || '',
-                                      subject_id: slot?.subject_id || 0,
-                                      subject_name: slot?.subject_name || '',
-                                      subject_code: slot?.subject_code || '',
-                                      lab_id: lab.id,
-                                      lab_name: lab.name,
-                                      day_order: day,
-                                      period,
-                                      preview_group: slot?.preview_group || '',
-                                    } as LabPreviewSlot;
-
-                                    const source = preview.find(p => p.id === draggingRowId);
+                                    if (preview.length === 0) return;
+                                    const dragged = Number(e.dataTransfer.getData('text/plain'));
+                                    const sourceId = Number.isFinite(dragged) && dragged > 0 ? dragged : draggingRowId;
+                                    if (!sourceId) return;
+                                    const source = preview.find(p => p.id === sourceId);
                                     if (!source) return;
-                                    setMovingId(source.id);
-                                    const res = await fetch('/api/labs/preview/move', {
-                                      method: 'PATCH',
-                                      headers: { 'Content-Type': 'application/json' },
-                                      body: JSON.stringify({
-                                        lab_requirement_id: source.lab_requirement_id,
-                                        from_day: source.day_order,
-                                        from_period: source.period,
-                                        to_day: target.day_order,
-                                        to_period: target.period,
-                                        to_lab_id: target.lab_id,
-                                      })
-                                    });
-                                    const data = await res.json();
-                                    setMovingId(null);
+
+                                    await movePreviewSlot(source, day, period, lab.id, 'Grid move applied.');
                                     setDraggingRowId(null);
-                                    if (!res.ok) {
-                                      setStatus({ type: 'error', msg: data.error || 'Failed to move by grid drag-drop.' });
-                                      return;
-                                    }
-                                    await loadPreview();
-                                    await loadAllLabSlots();
-                                    setStatus({ type: 'success', msg: 'Grid move applied.' });
                                   }}
                                 >
                                   <div
                                     draggable={!!slot && preview.length > 0}
-                                    onDragStart={() => {
-                                      if (slot && preview.length > 0) setDraggingRowId(slot.id);
+                                    onDragStart={e => {
+                                      if (slot && preview.length > 0) {
+                                        setDraggingRowId(slot.id);
+                                        e.dataTransfer.setData('text/plain', String(slot.id));
+                                        e.dataTransfer.effectAllowed = 'move';
+                                      }
                                     }}
+                                    onDragEnd={() => setDraggingRowId(null)}
                                     className={`min-h-[56px] rounded border px-2 py-1 ${slot ? 'border-cyan-500/20 bg-cyan-500/5 text-slate-200' : 'border-dashed border-[#1e2d47] text-slate-600'} ${movingId === slot?.id ? 'opacity-40' : ''}`}
                                   >
                                     {slot ? (
