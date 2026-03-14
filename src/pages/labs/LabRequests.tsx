@@ -342,13 +342,17 @@ export default function LabRequests() {
           </button>
           <button
             onClick={async () => {
+              if (showPreview) {
+                setShowPreview(false);
+                return;
+              }
               setShowPreview(true);
               await loadPreview();
             }}
             disabled={loadingPreview}
             className="px-4 py-2 rounded-lg border border-[#2a3a57] text-slate-200 hover:border-cyan-500 text-xs font-mono font-bold uppercase tracking-wider inline-flex items-center gap-2"
           >
-            <Eye size={14} /> {loadingPreview ? 'Loading…' : 'Open Preview'}
+            <Eye size={14} /> {loadingPreview ? 'Loading…' : (showPreview ? 'Close Preview' : 'Open Preview')}
           </button>
           <button
             onClick={() => setShowScheduleGrid(v => !v)}
