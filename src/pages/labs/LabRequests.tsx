@@ -96,6 +96,7 @@ export default function LabRequests() {
   const [preview, setPreview] = useState<LabPreviewSlot[]>([]);
   const [showPreview, setShowPreview] = useState(false);
   const [hasPreviewChanges, setHasPreviewChanges] = useState(false);
+  const [isEditMode, setIsEditMode] = useState(false);
   const [moveDrafts, setMoveDrafts] = useState<Record<number, { to_day: number; to_period: number; to_lab_id: number | null }>>({});
   const [movingId, setMovingId] = useState<number | null>(null);
   const [draggingRowId, setDraggingRowId] = useState<number | null>(null);
@@ -324,17 +325,33 @@ export default function LabRequests() {
     loadData();
     if (showScheduleGrid) await loadAllLabSlots();
     setHasPreviewChanges(false);
+    setIsEditMode(false);
     setStatus({ type: 'success', msg: `Lab timetable fixed (${data.applied || 0} slots committed).` });
   };
 
   const handleEditTimetable = async () => {
     setStatus(null);
+    setIsEditMode(true);
     setShowScheduleGrid(true);
     if (!showPreview) {
       setShowPreview(true);
       await loadPreview();
     }
-    setStatus({ type: 'success', msg: 'Timetable loaded in edit mode. Make changes and click Fix All to save.' });
+    setStatus({ type: 'success', msg: 'Edit mode enabled. Changes are auto-saved — click Fix All to commit.' });
+  };
+
+  const autoSavePreview = async () => {
+    try {
+      const res = await fetch('/api/labs/fix', { method: 'POST' });
+      if (res.ok) {
+        await loadPreview();
+        await loadAllLabSlots();
+        loadData();
+        setHasPreviewChanges(true);
+      }
+    } catch {
+      // silent — user can still click Fix All manually
+    }
   };
 
   const handleAssignGridCell = async (target: GridAssignTarget) => {
@@ -376,6 +393,7 @@ export default function LabRequests() {
         type: 'success',
         msg: `Added ${data.added_slots || 1} hour(s) from Day ${target.day_order} P${target.period}. (${data.assigned_slots || 0}/${data.required_slots || 0})`,
       });
+      autoSavePreview();
     } catch (error: any) {
       setStatus({ type: 'error', msg: error?.message || 'Network error while assigning slot.' });
     } finally {
@@ -405,6 +423,7 @@ export default function LabRequests() {
       await loadPreview();
       setHasPreviewChanges(true);
       setStatus({ type: 'success', msg: `Removed ${data.removed_slots || 0} slot(s) from preview.` });
+      autoSavePreview();
     } catch (error: any) {
       setStatus({ type: 'error', msg: error?.message || 'Network error while removing assigned subject.' });
     } finally {
@@ -507,6 +526,7 @@ export default function LabRequests() {
     if (showScheduleGrid) await loadAllLabSlots();
     setHasPreviewChanges(true);
     setStatus({ type: 'success', msg: successMessage });
+    autoSavePreview();
   };
 
   const moveGridSlot = async (
@@ -799,6 +819,7 @@ export default function LabRequests() {
             <button
               onClick={async () => {
                 setShowScheduleGrid(true);
+                setIsEditMode(true);
                 if (!showPreview) {
                   setShowPreview(true);
                   await loadPreview();
@@ -817,7 +838,7 @@ export default function LabRequests() {
           </button>
           <button
             onClick={handleFixPreview}
-            disabled={fixingPreview || !hasPreviewChanges}
+            disabled={fixingPreview || !isEditMode}
             className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-mono font-bold uppercase tracking-wider inline-flex items-center gap-2"
           >
             <Cpu size={14} /> {fixingPreview ? 'Fixing…' : 'Fix All'}
@@ -1040,6 +1061,7 @@ export default function LabRequests() {
                             <td className="p-2 font-mono text-slate-400">Day {day}</td>
                             {periods.map(period => {
                               const slot = labSlots.find(s => s.day_order === day && s.period === period);
+                              const canEditGrid = isEditMode;
                               const cellKey = gridCellKey(lab.id, day, period);
                               const isActiveAssignCell =
                                 activeGridAssign?.lab_id === lab.id &&
@@ -1052,9 +1074,11 @@ export default function LabRequests() {
                                   key={`c-${lab.id}-${day}-${period}`}
                                   className="p-1"
                                   onDragOver={e => {
+                                    if (!canEditGrid) return;
                                     e.preventDefault();
                                   }}
                                   onDrop={async e => {
+                                    if (!canEditGrid) return;
                                     e.preventDefault();
                                     const dragged = Number(e.dataTransfer.getData('text/plain'));
                                     const sourceId = Number.isFinite(dragged) && dragged > 0 ? dragged : draggingRowId;
@@ -1068,9 +1092,9 @@ export default function LabRequests() {
                                   }}
                                 >
                                   <div
-                                    draggable={!!slot}
+                                    draggable={!!slot && canEditGrid}
                                     onDragStart={e => {
-                                      if (slot) {
+                                      if (slot && canEditGrid) {
                                         setDraggingRowId(slot.id);
                                         e.dataTransfer.setData('text/plain', String(slot.id));
                                         e.dataTransfer.effectAllowed = 'move';
@@ -1083,7 +1107,7 @@ export default function LabRequests() {
                                       <>
                                         <div className="font-semibold truncate">{slot.class_name}</div>
                                         <div className="text-[10px] text-cyan-300 truncate">{slot.subject_code}</div>
-                                        {preview.length > 0 && (
+                                          {isEditMode && (
                                           <button
                                             onClick={() => handleRemoveGridSlot(slot)}
                                             disabled={isRemovingCell}
@@ -1095,7 +1119,9 @@ export default function LabRequests() {
                                       </>
                                     ) : (
                                       <div className="space-y-1">
-                                        {!isActiveAssignCell ? (
+                                        {!canEditGrid ? (
+                                          <div className="text-[10px] font-mono text-slate-600">FREE</div>
+                                        ) : !isActiveAssignCell ? (
                                           <button
                                             onClick={() => {
                                               setActiveGridAssign({ lab_id: lab.id, day_order: day, period });
