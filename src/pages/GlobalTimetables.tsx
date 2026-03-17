@@ -55,7 +55,8 @@ function DraggableSlot({ slot, day, period }: DraggableSlotProps) {
         {slot.type === 'placement' ? 'PLACEMENT' : slot.subject_name}
       </div>
       <div className="text-[10px] text-cyan-400 font-mono">{slot.type === 'placement' ? 'TRAINING' : slot.subject_code}</div>
-      {slot.type !== 'placement' && <div className="text-[9px] text-slate-500">{slot.staff_name}</div>}
+      {slot.type !== 'placement' && slot.staff_name && <div className="text-[9px] text-slate-500">{slot.staff_name}</div>}
+      {slot.type !== 'placement' && slot.lab_name && <div className="text-[9px] text-emerald-400 font-mono">{slot.lab_name}</div>}
     </div>
   );
 }
@@ -311,6 +312,7 @@ export default function GlobalTimetables() {
                           {activeSlot.type === 'placement' ? 'PLACEMENT' : activeSlot.subject_name}
                         </div>
                         <div className="text-[10px] text-cyan-400 font-mono">{activeSlot.type === 'placement' ? 'TRAINING' : activeSlot.subject_code}</div>
+                        {activeSlot.type !== 'placement' && activeSlot.lab_name && <div className="text-[9px] text-emerald-400 font-mono">{activeSlot.lab_name}</div>}
                       </div>
                     ) : null}
                   </DragOverlay>

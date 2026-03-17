@@ -95,6 +95,7 @@ export default function LabRequests() {
   const [unassigningAll, setUnassigningAll] = useState(false);
   const [preview, setPreview] = useState<LabPreviewSlot[]>([]);
   const [showPreview, setShowPreview] = useState(false);
+  const [hasPreviewChanges, setHasPreviewChanges] = useState(false);
   const [moveDrafts, setMoveDrafts] = useState<Record<number, { to_day: number; to_period: number; to_lab_id: number | null }>>({});
   const [movingId, setMovingId] = useState<number | null>(null);
   const [draggingRowId, setDraggingRowId] = useState<number | null>(null);
@@ -206,6 +207,7 @@ export default function LabRequests() {
       return;
     }
     setPreview(Array.isArray(data) ? data : []);
+    setHasPreviewChanges(false);
   };
 
   const handleAutoAssign = async () => {
@@ -321,7 +323,18 @@ export default function LabRequests() {
     await loadPreview();
     loadData();
     if (showScheduleGrid) await loadAllLabSlots();
+    setHasPreviewChanges(false);
     setStatus({ type: 'success', msg: `Lab timetable fixed (${data.applied || 0} slots committed).` });
+  };
+
+  const handleEditTimetable = async () => {
+    setStatus(null);
+    setShowScheduleGrid(true);
+    if (!showPreview) {
+      setShowPreview(true);
+      await loadPreview();
+    }
+    setStatus({ type: 'success', msg: 'Timetable loaded in edit mode. Make changes and click Fix All to save.' });
   };
 
   const handleAssignGridCell = async (target: GridAssignTarget) => {
@@ -355,6 +368,7 @@ export default function LabRequests() {
       }
 
       await loadPreview();
+      setHasPreviewChanges(true);
       setGridAssignInput('');
       setGridAssignHours('1');
       setActiveGridAssign(null);
@@ -389,6 +403,7 @@ export default function LabRequests() {
       }
 
       await loadPreview();
+      setHasPreviewChanges(true);
       setStatus({ type: 'success', msg: `Removed ${data.removed_slots || 0} slot(s) from preview.` });
     } catch (error: any) {
       setStatus({ type: 'error', msg: error?.message || 'Network error while removing assigned subject.' });
@@ -457,6 +472,7 @@ export default function LabRequests() {
     }
     await loadPreview();
     if (showScheduleGrid) await loadAllLabSlots();
+    setHasPreviewChanges(true);
     setStatus({ type: 'success', msg: 'Preview slot moved.' });
   };
 
@@ -489,6 +505,7 @@ export default function LabRequests() {
     }
     await loadPreview();
     if (showScheduleGrid) await loadAllLabSlots();
+    setHasPreviewChanges(true);
     setStatus({ type: 'success', msg: successMessage });
   };
 
@@ -644,6 +661,33 @@ export default function LabRequests() {
     return map;
   }, [items, preview]);
 
+  const labCapacityMap = useMemo(() => {
+    const map = new Map<number, { used: number; capacity: number }>();
+    // Initialize all labs with 30-hour capacity
+    for (const lab of labs) {
+      map.set(lab.id, { used: 0, capacity: 30 });
+    }
+    // Count hours used per lab
+    for (const slot of gridSource) {
+      const current = map.get(slot.lab_id);
+      if (current) {
+        current.used += 1;
+        map.set(slot.lab_id, current);
+      }
+    }
+    return map;
+  }, [labs, gridSource]);
+
+  const totalHoursRequested = useMemo(() => {
+    let total = 0;
+    for (const item of items) {
+      if (item.status === 'pending' || item.status === 'not_submitted') {
+        total += Number(item.duration || item.hours_per_week || 1);
+      }
+    }
+    return total;
+  }, [items]);
+
   const manualAssignableItems = useMemo(() => {
     return items.filter(item => {
       if (!item.req_id) return false;
@@ -744,18 +788,27 @@ export default function LabRequests() {
         </div>
 
         <div className="mt-4 flex flex-wrap items-center gap-2 justify-end">
-          <button
-            onClick={async () => {
-              setShowScheduleGrid(true);
-              if (!showPreview) {
-                setShowPreview(true);
-                await loadPreview();
-              }
-            }}
-            className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white text-xs font-mono font-bold uppercase tracking-wider inline-flex items-center gap-2"
-          >
-            <CheckCircle2 size={14} /> Assign
-          </button>
+          {preview.length === 0 && allLabSlots.length > 0 ? (
+            <button
+              onClick={handleEditTimetable}
+              className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-mono font-bold uppercase tracking-wider inline-flex items-center gap-2"
+            >
+              <Eye size={14} /> Edit Timetable
+            </button>
+          ) : (
+            <button
+              onClick={async () => {
+                setShowScheduleGrid(true);
+                if (!showPreview) {
+                  setShowPreview(true);
+                  await loadPreview();
+                }
+              }}
+              className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white text-xs font-mono font-bold uppercase tracking-wider inline-flex items-center gap-2"
+            >
+              <CheckCircle2 size={14} /> Assign
+            </button>
+          )}
           <button
             onClick={() => setShowScheduleGrid(v => !v)}
             className="px-4 py-2 rounded-lg border border-[#2a3a57] text-slate-200 hover:border-cyan-500 text-xs font-mono font-bold uppercase tracking-wider inline-flex items-center gap-2"
@@ -764,7 +817,7 @@ export default function LabRequests() {
           </button>
           <button
             onClick={handleFixPreview}
-            disabled={fixingPreview || preview.length === 0}
+            disabled={fixingPreview || !hasPreviewChanges}
             className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-mono font-bold uppercase tracking-wider inline-flex items-center gap-2"
           >
             <Cpu size={14} /> {fixingPreview ? 'Fixing…' : 'Fix All'}
@@ -937,9 +990,6 @@ export default function LabRequests() {
           <div className="px-4 py-3 border-b border-[#1e2d47] flex items-center justify-between gap-2 flex-wrap">
             <h2 className="text-sm font-mono font-bold uppercase tracking-wider text-white">All Lab Schedule Grid</h2>
             <div className="flex items-center gap-3">
-              <span className="text-xs font-mono text-slate-400">
-                Mode: {preview.length > 0 ? 'Preview (draggable)' : 'Committed Timetable (draggable)'}
-              </span>
               {preview.length > 0 && (
                 <button
                   onClick={handleFixPreview}
@@ -960,7 +1010,18 @@ export default function LabRequests() {
               return (
                 <div key={`grid-${lab.id}`} className="rounded-lg border border-[#1e2d47] overflow-hidden">
                   <div className="px-3 py-2 bg-[#141c2e] border-b border-[#1e2d47] flex items-center justify-between">
-                    <h3 className="text-xs font-mono font-bold text-cyan-300 uppercase tracking-wider">{lab.name}</h3>
+                    <div className="flex items-center gap-3">
+                      <div>
+                        <h3 className="text-xs font-mono font-bold text-cyan-300 uppercase tracking-wider">{lab.name}</h3>
+                        <p className="text-[9px] font-mono text-slate-500 mt-0.5">Lab #{lab.id}</p>
+                      </div>
+                      <div className="text-[10px] font-mono text-slate-600 flex items-center gap-1">
+                        <span className={labCapacityMap.get(lab.id)!.used > 20 ? 'text-red-400 font-bold' : 'text-emerald-400'}>
+                          {labCapacityMap.get(lab.id)!.used}/{labCapacityMap.get(lab.id)!.capacity}h
+                        </span>
+                        <span className="text-slate-700">per week</span>
+                      </div>
+                    </div>
                     <span className="text-[10px] font-mono text-slate-500">{labSlots.length} slots</span>
                   </div>
                   <div className="overflow-x-auto p-2">
@@ -1282,6 +1343,16 @@ export default function LabRequests() {
             )}
           </button>
         ))}
+      </div>
+
+      <div className="bg-slate-500/10 border-l-2 border-cyan-500 rounded px-3 py-2 mb-3">
+        <p className="text-xs font-mono text-slate-400">
+          <span className="text-cyan-300 font-bold">{totalHoursRequested} total hours</span>
+          <span className="text-slate-600 mx-1">·</span>
+          <span className="text-slate-500">{Math.ceil(totalHoursRequested / 150)} weeks</span>
+          <span className="text-slate-600 mx-1">·</span>
+          <span className="text-slate-500">@30h/lab/week</span>
+        </p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
