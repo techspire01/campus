@@ -3363,10 +3363,11 @@ async function startServer() {
     try {
       const { sessionId } = req.params;
       const rows = await pool.query(
-        `SELECT id, session_id, class_id, subject_id, staff_id, day_order, period, hours_per_week
-         FROM cg_tamil_preview_slots
-         WHERE session_id = $1
-         ORDER BY class_id, day_order, period`,
+        `SELECT p.id, p.session_id, p.class_id, c.name AS class_name, p.subject_id, p.staff_id, p.day_order, p.period, p.hours_per_week
+         FROM cg_tamil_preview_slots p
+         JOIN cg_classes c ON c.id = p.class_id
+         WHERE p.session_id = $1
+         ORDER BY p.class_id, p.day_order, p.period`,
         [sessionId]
       );
       res.json(rows.rows);

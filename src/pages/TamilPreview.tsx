@@ -6,6 +6,7 @@ import { clsx } from 'clsx';
 interface TamilSlot {
   id?: number;
   class_id: number;
+  class_name?: string;
   subject_id: number;
   staff_id: number | null;
   day_order: number;
@@ -240,7 +241,7 @@ export default function TamilPreview() {
         {Array.from(classGroups.entries()).map(([classId, classSlots]) => (
           <section key={classId} className="bg-[#0f1623] border border-[#1e2d47] rounded-xl p-6">
             <div className="text-sm font-mono text-slate-400 mb-4 flex justify-between">
-              <span>Class ID: {classId}</span>
+              <span>Class: {classSlots[0]?.class_name || `Class ${classId}`}</span>
               <span>Assigned: {classSlots.length} slots</span>
             </div>
             
