@@ -16,6 +16,7 @@ export default function DepartmentDashboard() {
     student_strength: 0,
     tutor_staff_id: '',
   });
+  const [strengthDrafts, setStrengthDrafts] = useState<Record<number, string>>({});
   const [status, setStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
 
   useEffect(() => {
@@ -55,22 +56,24 @@ export default function DepartmentDashboard() {
     setStatus({ type: 'success', msg: 'Class saved to database' });
   };
 
-  const handleTutorChange = async (classId: number, tutorStaffId: string) => {
+  const handleClassUpdate = async (classId: number, tutorStaffId: string, studentStrength: number) => {
     setStatus(null);
     const res = await fetch(`/api/classes/${classId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        tutor_staff_id: tutorStaffId ? parseInt(tutorStaffId) : null
+        tutor_staff_id: tutorStaffId ? parseInt(tutorStaffId) : null,
+        student_strength: studentStrength,
       })
     });
     const data = await res.json();
     if (!res.ok) {
-      setStatus({ type: 'error', msg: data.error || 'Failed to assign tutor' });
-      return;
+      setStatus({ type: 'error', msg: data.error || 'Failed to update class details' });
+      return false;
     }
     setClasses(current => current.map(item => item.id === classId ? data as Class : item));
-    setStatus({ type: 'success', msg: 'Tutor assignment saved' });
+    setStatus({ type: 'success', msg: 'Class details updated' });
+    return true;
   };
 
   if (!dept) return <div className="text-cyan-400 font-mono">Loading department data...</div>;
@@ -170,11 +173,53 @@ export default function DepartmentDashboard() {
                       <select
                         className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
                         value={item.tutor_staff_id || ''}
-                        onChange={e => handleTutorChange(item.id, e.target.value)}
+                        onChange={e => handleClassUpdate(item.id, e.target.value, item.student_strength)}
                       >
                         <option value="">Not assigned</option>
                         {staff.map(member => <option key={member.id} value={member.id}>{member.name}</option>)}
                       </select>
+                      <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 mt-3">Class Strength</div>
+                      {(() => {
+                        const draft = strengthDrafts[item.id];
+                        const currentStrength = item.student_strength;
+                        const parsedDraft = draft === undefined ? currentStrength : (parseInt(draft, 10) || 0);
+                        const hasStrengthChange = draft !== undefined && parsedDraft !== currentStrength;
+
+                        return (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min={1}
+                          className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                          value={draft ?? String(currentStrength)}
+                          onChange={e => {
+                            setStrengthDrafts(current => ({ ...current, [item.id]: e.target.value }));
+                          }}
+                        />
+                        {hasStrengthChange && (
+                          <button
+                            onClick={async () => {
+                              const ok = await handleClassUpdate(
+                                item.id,
+                                item.tutor_staff_id ? String(item.tutor_staff_id) : '',
+                                parsedDraft
+                              );
+                              if (ok) {
+                                setStrengthDrafts(current => {
+                                  const next = { ...current };
+                                  delete next[item.id];
+                                  return next;
+                                });
+                              }
+                            }}
+                            className="px-3 py-2 rounded bg-cyan-600 hover:bg-cyan-500 text-xs font-mono font-bold text-white uppercase"
+                          >
+                            Save
+                          </button>
+                        )}
+                      </div>
+                        );
+                      })()}
                       <div className="text-[10px] text-slate-500 font-mono">
                         {item.tutor_name ? `Tutor: ${item.tutor_name}` : 'Tutor not assigned'}
                       </div>
