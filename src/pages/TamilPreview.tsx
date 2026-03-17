@@ -2,12 +2,14 @@ import { Fragment, useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Calendar, CheckCircle, Edit, RotateCcw } from 'lucide-react';
 import { clsx } from 'clsx';
-import { Settings } from '../types';
+import { Class, Settings } from '../types';
 
 interface TamilSlot {
   id?: number;
   class_id: number;
   class_name?: string;
+  dept_name?: string;
+  year?: number;
   subject_id: number;
   staff_id: number | null;
   day_order: number;
@@ -19,6 +21,8 @@ interface ExistingSlot {
   id: number;
   class_id: number;
   class_name?: string;
+  dept_name?: string;
+  year?: number;
   subject_id: number | null;
   subject_name?: string;
   subject_code?: string;
@@ -41,6 +45,7 @@ export default function TamilPreview() {
   const navigate = useNavigate();
   const [previewSlots, setPreviewSlots] = useState<TamilSlot[]>([]);
   const [timetableSlots, setTimetableSlots] = useState<ExistingSlot[]>([]);
+  const [classes, setClasses] = useState<Class[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
@@ -49,6 +54,8 @@ export default function TamilPreview() {
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [progress, setProgress] = useState(0);
   const [dragState, setDragState] = useState<DragState | null>(null);
+  const [selectedDept, setSelectedDept] = useState('all');
+  const [selectedYear, setSelectedYear] = useState('all');
 
   useEffect(() => {
     if (!sessionId) return;
@@ -61,6 +68,15 @@ export default function TamilPreview() {
       .then(setSettings)
       .catch((err: any) => {
         setStatus({ type: 'error', msg: `Failed to load settings: ${err.message}` });
+      });
+  }, []);
+
+  useEffect(() => {
+    fetch('/api/classes')
+      .then(res => res.json())
+      .then(data => setClasses(Array.isArray(data) ? data : []))
+      .catch(() => {
+        setClasses([]);
       });
   }, []);
 
@@ -157,7 +173,17 @@ export default function TamilPreview() {
     if (!sessionId) return;
 
     try {
-      const res = await fetch(`/api/tamil/fix/${sessionId}`, { method: 'POST' });
+      const res = await fetch(`/api/tamil/fix/${sessionId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          previewSlots: previewSlots.map(slot => ({
+            class_id: slot.class_id,
+            day_order: slot.day_order,
+            period: slot.period,
+          })),
+        }),
+      });
       const data = await res.json();
       if (!res.ok) {
         setStatus({ type: 'error', msg: data.error || 'Failed to fix slots' });
@@ -176,24 +202,48 @@ export default function TamilPreview() {
   }
 
   const days = [1, 2, 3, 4, 5, 6];
-  const classGroups = new Map<number, { preview: TamilSlot[]; existing: ExistingSlot[]; className?: string }>();
+  const classGroups = new Map<number, {
+    preview: TamilSlot[];
+    existing: ExistingSlot[];
+    className?: string;
+    deptName?: string;
+    year?: number;
+  }>();
   
   for (const slot of previewSlots) {
     if (!classGroups.has(slot.class_id)) {
-      classGroups.set(slot.class_id, { preview: [], existing: [], className: slot.class_name });
+      classGroups.set(slot.class_id, {
+        preview: [],
+        existing: [],
+        className: slot.class_name,
+        deptName: slot.dept_name,
+        year: slot.year,
+      });
     }
     const group = classGroups.get(slot.class_id)!;
+    const classMeta = classes.find(cls => cls.id === slot.class_id);
     group.preview.push(slot);
-    group.className = group.className || slot.class_name;
+    group.className = group.className || slot.class_name || classMeta?.name;
+    group.deptName = group.deptName || slot.dept_name || classMeta?.dept_name;
+    group.year = group.year || slot.year || classMeta?.year;
   }
 
   for (const slot of timetableSlots) {
     if (!classGroups.has(slot.class_id)) {
-      classGroups.set(slot.class_id, { preview: [], existing: [], className: slot.class_name });
+      classGroups.set(slot.class_id, {
+        preview: [],
+        existing: [],
+        className: slot.class_name,
+        deptName: slot.dept_name,
+        year: slot.year,
+      });
     }
     const group = classGroups.get(slot.class_id)!;
+    const classMeta = classes.find(cls => cls.id === slot.class_id);
     group.existing.push(slot);
-    group.className = group.className || slot.class_name;
+    group.className = group.className || slot.class_name || classMeta?.name;
+    group.deptName = group.deptName || slot.dept_name || classMeta?.dept_name;
+    group.year = group.year || slot.year || classMeta?.year;
   }
 
   if (!settings) {
@@ -203,6 +253,14 @@ export default function TamilPreview() {
   const periods = Array.from({ length: parseInt(settings.periods_per_day) }, (_, i) => i + 1);
   const breakAfter = parseInt(settings.break_after_period);
   const lunchAfter = parseInt(settings.lunch_after_period);
+  const allClassGroups = Array.from(classGroups.entries());
+  const departmentOptions = [...new Set(allClassGroups.map(([, group]) => group.deptName).filter(Boolean) as string[])].sort();
+  const yearOptions = [...new Set(allClassGroups.map(([, group]) => group.year).filter((year): year is number => typeof year === 'number'))].sort((a, b) => a - b);
+  const filteredClassGroups = allClassGroups.filter(([, group]) => {
+    const matchesDept = selectedDept === 'all' || group.deptName === selectedDept;
+    const matchesYear = selectedYear === 'all' || String(group.year) === selectedYear;
+    return matchesDept && matchesYear;
+  });
 
   return (
     <div className="space-y-8 p-8">
@@ -286,15 +344,49 @@ export default function TamilPreview() {
         </div>
       )}
 
+      <div className="flex flex-col gap-4 md:flex-row md:items-end">
+        <div className="space-y-2">
+          <label className="block text-[10px] font-mono uppercase tracking-[0.2em] text-slate-500">Department</label>
+          <select
+            value={selectedDept}
+            onChange={e => setSelectedDept(e.target.value)}
+            className="min-w-[220px] rounded-lg border border-[#1e2d47] bg-[#0f1623] px-4 py-2 text-sm text-slate-200 outline-none focus:border-cyan-500"
+          >
+            <option value="all">All Departments</option>
+            {departmentOptions.map(dept => (
+              <option key={dept} value={dept}>{dept}</option>
+            ))}
+          </select>
+        </div>
+        <div className="space-y-2">
+          <label className="block text-[10px] font-mono uppercase tracking-[0.2em] text-slate-500">Year</label>
+          <select
+            value={selectedYear}
+            onChange={e => setSelectedYear(e.target.value)}
+            className="min-w-[160px] rounded-lg border border-[#1e2d47] bg-[#0f1623] px-4 py-2 text-sm text-slate-200 outline-none focus:border-cyan-500"
+          >
+            <option value="all">All Years</option>
+            {yearOptions.map(year => (
+              <option key={year} value={String(year)}>Year {year}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
       <div className="space-y-8">
-        {Array.from(classGroups.entries()).map(([classId, classGroup]) => (
+        {filteredClassGroups.map(([classId, classGroup]) => (
           <section key={classId} className="bg-[#0f1623] border border-[#1e2d47] rounded-xl overflow-hidden shadow-2xl">
             <div className="bg-[#141c2e] px-6 py-4 border-b border-[#1e2d47] flex justify-between items-center gap-4">
               <div className="flex items-center gap-3">
                 <Calendar className="text-cyan-400" size={20} />
-                <h2 className="font-mono font-bold text-white uppercase tracking-wider">
-                  {classGroup.className || `Class ${classId}`} Schedule
-                </h2>
+                <div>
+                  <h2 className="font-mono font-bold text-white uppercase tracking-wider">
+                    {classGroup.className || `Class ${classId}`} Schedule
+                  </h2>
+                  <div className="text-[10px] font-mono uppercase tracking-[0.2em] text-slate-500">
+                    {classGroup.deptName || 'Unknown Department'}{classGroup.year ? ` • Year ${classGroup.year}` : ''}
+                  </div>
+                </div>
               </div>
               <div className="text-sm font-mono text-slate-400">
                 Assigned: {classGroup.preview.length} Tamil slots
@@ -427,6 +519,12 @@ export default function TamilPreview() {
       {previewSlots.length === 0 && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-4 text-center">
           <p className="text-sm text-amber-300 font-mono">No Tamil slots scheduled for this session.</p>
+        </div>
+      )}
+
+      {previewSlots.length > 0 && filteredClassGroups.length === 0 && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-4 text-center">
+          <p className="text-sm text-amber-300 font-mono">No classes match the selected department and year filters.</p>
         </div>
       )}
     </div>

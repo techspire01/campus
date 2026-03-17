@@ -3363,9 +3363,11 @@ async function startServer() {
     try {
       const { sessionId } = req.params;
       const previewRows = await pool.query(
-        `SELECT p.id, p.session_id, p.class_id, c.name AS class_name, p.subject_id, p.staff_id, p.day_order, p.period, p.hours_per_week
+        `SELECT p.id, p.session_id, p.class_id, c.name AS class_name, c.year, d.name AS dept_name,
+                p.subject_id, p.staff_id, p.day_order, p.period, p.hours_per_week
          FROM cg_tamil_preview_slots p
          JOIN cg_classes c ON c.id = p.class_id
+         LEFT JOIN cg_departments d ON d.id = c.dept_id
          WHERE p.session_id = $1
          ORDER BY p.class_id, p.day_order, p.period`,
         [sessionId]
@@ -3376,12 +3378,14 @@ async function startServer() {
 
       if (classIds.length > 0) {
         const timetableResult = await pool.query(
-          `SELECT ts.id, ts.class_id, c.name AS class_name, ts.subject_id, s.name AS subject_name, s.code AS subject_code,
-                  ts.staff_id, st.name AS staff_name, ts.day_order, ts.period, ts.type
+          `SELECT ts.id, ts.class_id, c.name AS class_name, c.year, d.name AS dept_name, ts.subject_id, s.name AS subject_name, s.code AS subject_code,
+                  ts.staff_id, st.name AS staff_name, l.name AS lab_name, ts.day_order, ts.period, ts.type
            FROM cg_timetable_slots ts
            JOIN cg_classes c ON c.id = ts.class_id
+           LEFT JOIN cg_departments d ON d.id = c.dept_id
            LEFT JOIN cg_subjects s ON s.id = ts.subject_id
            LEFT JOIN cg_staff st ON st.id = ts.staff_id
+           LEFT JOIN cg_labs l ON l.id = ts.lab_id
            WHERE ts.class_id = ANY($1::int[])
            ORDER BY ts.class_id, ts.day_order, ts.period`,
           [classIds]
@@ -3407,7 +3411,94 @@ async function startServer() {
           [sessionId]
         );
 
-        for (const row of previewRows.rows as any[]) {
+        if ((previewRows.rowCount ?? 0) === 0) {
+          throw new Error('Preview session not found.');
+        }
+
+        const existingPreview = previewRows.rows as Array<{
+          class_id: number;
+          subject_id: number;
+          staff_id: number | null;
+          day_order: number;
+          period: number;
+          hours_per_week: number;
+        }>;
+
+        const requestedPreviewSlots = Array.isArray(req.body?.previewSlots) ? req.body.previewSlots : null;
+        const classMeta = new Map<number, { subject_id: number; staff_id: number | null; hours_per_week: number; count: number }>();
+        for (const row of existingPreview) {
+          const current = classMeta.get(row.class_id);
+          if (current) {
+            current.count += 1;
+          } else {
+            classMeta.set(row.class_id, {
+              subject_id: Number(row.subject_id),
+              staff_id: row.staff_id ? Number(row.staff_id) : null,
+              hours_per_week: Number(row.hours_per_week || 1),
+              count: 1,
+            });
+          }
+        }
+
+        const finalPreviewRows = requestedPreviewSlots
+          ? requestedPreviewSlots.map((slot: any) => {
+              const classId = Number(slot?.class_id);
+              const dayOrder = Number(slot?.day_order);
+              const period = Number(slot?.period);
+              const meta = classMeta.get(classId);
+              if (!classId || !dayOrder || !period || !meta) {
+                throw new Error('Invalid edited Tamil preview slots.');
+              }
+              return {
+                class_id: classId,
+                subject_id: meta.subject_id,
+                staff_id: meta.staff_id,
+                day_order: dayOrder,
+                period,
+                hours_per_week: meta.hours_per_week,
+              };
+            })
+          : existingPreview;
+
+        const finalCounts = new Map<number, number>();
+        const previewKeys = new Set<string>();
+        for (const row of finalPreviewRows) {
+          const key = `${row.class_id}-${row.day_order}-${row.period}`;
+          if (previewKeys.has(key)) {
+            throw new Error(`Duplicate Tamil preview slot at Day ${row.day_order} Period ${row.period} for class ${row.class_id}.`);
+          }
+          previewKeys.add(key);
+          finalCounts.set(row.class_id, (finalCounts.get(row.class_id) || 0) + 1);
+        }
+
+        for (const [classId, meta] of classMeta.entries()) {
+          if ((finalCounts.get(classId) || 0) !== meta.count) {
+            throw new Error('Tamil preview slot count mismatch. Refresh the preview and try again.');
+          }
+        }
+
+        const selectedClassIds = [...classMeta.keys()];
+        const occupiedRows = await client.query(
+          `SELECT class_id, day_order, period
+           FROM cg_timetable_slots
+           WHERE class_id = ANY($1::int[])`,
+          [selectedClassIds]
+        );
+
+        const occupiedKeys = new Set(
+          (occupiedRows.rows as Array<{ class_id: number; day_order: number; period: number }>).map(
+            row => `${row.class_id}-${row.day_order}-${row.period}`
+          )
+        );
+
+        for (const row of finalPreviewRows) {
+          const key = `${row.class_id}-${row.day_order}-${row.period}`;
+          if (occupiedKeys.has(key)) {
+            throw new Error(`Tamil slot conflicts with an occupied timetable slot at Day ${row.day_order} Period ${row.period} for class ${row.class_id}.`);
+          }
+        }
+
+        for (const row of finalPreviewRows) {
           await client.query(
             `INSERT INTO cg_timetable_slots (class_id, subject_id, staff_id, day_order, period, type)
              VALUES ($1, $2, $3, $4, $5, 'tamil')

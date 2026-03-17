@@ -63,7 +63,7 @@ def solve_tamil_scheduling_split(selected_classes, staff_assignments, hours_assi
     """Allocate Tamil slots split between morning and afternoon halves with staff constraints."""
     result_slots = []
     staff_schedule = {}  # staff_id -> set of (day, period)
-    class_schedule = {}  # class_id -> set of day_orders assigned
+    unscheduled_classes = []
     
     # Shuffle classes for random allocation
     class_list = list(selected_classes)
@@ -157,7 +157,19 @@ def solve_tamil_scheduling_split(selected_classes, staff_assignments, hours_assi
                 if staff_id_int not in staff_schedule:
                     staff_schedule[staff_id_int] = set()
                 staff_schedule[staff_id_int].add((day, start))
-    
+
+        allocated_total = morning_count + afternoon_count
+        if allocated_total < total_hours:
+            class_label = class_data.get("name") or f'class {class_id}'
+            unscheduled_classes.append(
+                f"{class_label}: allocated {allocated_total} of {total_hours} Tamil hour(s)"
+            )
+
+    if unscheduled_classes:
+        return {
+            "error": "Insufficient free slots for Tamil scheduling. " + "; ".join(unscheduled_classes)
+        }
+
     return {"scheduled_slots": result_slots}
 
 
