@@ -28,6 +28,7 @@ import LabRequests from './pages/labs/LabRequests';
 import LabTimetable from './pages/labs/LabTimetable';
 import PlacementManagement from './pages/PlacementManagement';
 import PlacementPreview from './pages/PlacementPreview';
+import TamilPreview from './pages/TamilPreview';
 import GlobalTimetables from './pages/GlobalTimetables';
 import CommonSubjects from './pages/CommonSubjects';
 
@@ -178,6 +179,7 @@ function AppContent() {
             <Route path="/labs/:labId" element={<LabTimetable />} />
             <Route path="/placement" element={<PlacementManagement />} />
             <Route path="/placement/preview/:blockId" element={<PlacementPreview />} />
+            <Route path="/tamil/preview/:sessionId" element={<TamilPreview />} />
             <Route path="/timetables" element={<GlobalTimetables />} />
           </Routes>
         </div>

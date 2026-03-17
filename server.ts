@@ -125,6 +125,19 @@ async function ensureSchema() {
       status TEXT NOT NULL DEFAULT 'preview',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS cg_tamil_preview_slots (
+      id SERIAL PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      class_id INTEGER NOT NULL REFERENCES cg_classes(id) ON DELETE CASCADE,
+      subject_id INTEGER NOT NULL REFERENCES cg_subjects(id) ON DELETE CASCADE,
+      staff_id INTEGER REFERENCES cg_staff(id) ON DELETE SET NULL,
+      day_order INTEGER NOT NULL,
+      period INTEGER NOT NULL,
+      hours_per_week INTEGER NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (session_id, class_id, day_order, period)
+    );
   `);
 
   await pool.query(`
@@ -859,6 +872,78 @@ function runLabScheduler(payload: LabSchedulerRequest): Promise<LabSchedulerResp
         resolve(JSON.parse(stdout) as LabSchedulerResponse);
       } catch {
         reject(new Error(`Invalid lab solver output: ${stdout || stderr}`));
+      }
+    });
+
+    python.stdin.write(JSON.stringify(payload));
+    python.stdin.end();
+  });
+}
+
+interface TamilSchedulerRequest {
+  selected_classes: Array<{ id: number; dept_id: number; year: number }>;
+  staff_assignments: Record<number, number>;
+  hours_assignments: Record<number, number>;
+  days: number[];
+  periods_per_day: number;
+  occupied_slots: Record<string, Array<{ day_order: number; period: number }>>;
+  subject_id: number;
+}
+
+interface TamilSchedulerResponse {
+  scheduled_slots?: Array<{
+    class_id: number;
+    day_order: number;
+    period: number;
+    staff_id: number | null;
+  }>;
+  error?: string;
+}
+
+function runTamilScheduler(payload: TamilSchedulerRequest): Promise<TamilSchedulerResponse> {
+  return new Promise((resolve, reject) => {
+    const configuredPython = process.env.PYTHON_PATH;
+    const workspaceVenvWindows = path.join(process.cwd(), '.venv', 'Scripts', 'python.exe');
+    const workspaceVenvUnix = path.join(process.cwd(), '.venv', 'bin', 'python');
+    const pythonBinary = configuredPython
+      || (fs.existsSync(workspaceVenvWindows) ? workspaceVenvWindows : '')
+      || (fs.existsSync(workspaceVenvUnix) ? workspaceVenvUnix : '')
+      || 'python';
+    const scriptPath = path.join(process.cwd(), 'scheduler', 'tamil_scheduler.py');
+    const python = spawn(pythonBinary, [scriptPath]);
+
+    let stdout = '';
+    let stderr = '';
+
+    python.stdout.on('data', (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+
+    python.stderr.on('data', (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+
+    python.on('error', (err: any) => {
+      reject(new Error(`Tamil scheduler process error: ${err.message}`));
+    });
+
+    python.on('close', code => {
+      if (code !== 0) {
+        reject(new Error(`Tamil scheduler failed with code ${code}: ${stderr || stdout || 'No output'}`));
+        return;
+      }
+
+      if (!stdout || stdout.trim() === '') {
+        reject(new Error('Tamil scheduler produced no output'));
+        return;
+      }
+
+      try {
+        const trimmed = stdout.trim();
+        const parsed = JSON.parse(trimmed) as TamilSchedulerResponse;
+        resolve(parsed);
+      } catch (parseErr) {
+        reject(new Error(`Invalid Tamil scheduler JSON output: ${stdout.substring(0, 200)}`));
       }
     });
 
@@ -3170,6 +3255,268 @@ async function startServer() {
       res.json({ success: true, message: 'All timetables cleared' });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Tamil Scheduling Endpoints
+  app.post('/api/tamil/schedule', async (req, res) => {
+    try {
+      const { selectedClassIds, staffAssignments, hoursAssignments, subjectId } = req.body;
+
+      if (!selectedClassIds || !Array.isArray(selectedClassIds) || selectedClassIds.length === 0) {
+        return res.status(400).json({ error: 'Invalid or empty selectedClassIds' });
+      }
+      if (!staffAssignments || typeof staffAssignments !== 'object') {
+        return res.status(400).json({ error: 'Invalid staffAssignments' });
+      }
+      if (!hoursAssignments || typeof hoursAssignments !== 'object') {
+        return res.status(400).json({ error: 'Invalid hoursAssignments' });
+      }
+      if (!subjectId || Number.isNaN(Number(subjectId))) {
+        return res.status(400).json({ error: 'Invalid subjectId' });
+      }
+
+      const classRows = await pool.query(
+        `SELECT id, dept_id, year FROM cg_classes WHERE id = ANY($1::int[])`,
+        [selectedClassIds]
+      );
+      const classDetails = classRows.rows as Array<{ id: number; dept_id: number; year: number }>;
+
+      if (classDetails.length === 0) {
+        return res.status(400).json({ error: 'No classes found for the given IDs' });
+      }
+
+      const settingsRows = await pool.query('SELECT key, value FROM cg_settings');
+      const settings = settingsRows.rows.reduce((acc: Record<string, string>, row: any) => {
+        acc[row.key] = row.value;
+        return acc;
+      }, {});
+      const periodsPerDay = Math.max(1, Number(settings.periods_per_day || 6));
+
+      const occupiedRows = await pool.query(
+        `SELECT class_id, day_order, period FROM cg_timetable_slots WHERE class_id = ANY($1::int[])`,
+        [selectedClassIds]
+      );
+
+      const occupied: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const classId of selectedClassIds) {
+        occupied[String(classId)] = [];
+      }
+      for (const row of occupiedRows.rows as any[]) {
+        occupied[String(row.class_id)].push({ day_order: row.day_order, period: row.period });
+      }
+
+      const schedule = await runTamilScheduler({
+        selected_classes: classDetails,
+        staff_assignments: staffAssignments,
+        hours_assignments: hoursAssignments,
+        days: [1, 2, 3, 4, 5, 6],
+        periods_per_day: periodsPerDay,
+        occupied_slots: occupied,
+        subject_id: Number(subjectId),
+      });
+
+      if (schedule.error) {
+        return res.status(400).json({ error: schedule.error });
+      }
+
+      if (!schedule.scheduled_slots || !Array.isArray(schedule.scheduled_slots)) {
+        return res.status(400).json({ error: 'Scheduler returned invalid slots format' });
+      }
+
+      if (schedule.scheduled_slots.length === 0) {
+        return res.status(400).json({ error: 'No available slots found for scheduling' });
+      }
+
+      const sessionId = `tamil_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+      
+      await pool.query('DELETE FROM cg_tamil_preview_slots WHERE session_id = $1', [sessionId]);
+
+      for (const slot of schedule.scheduled_slots) {
+        try {
+          await pool.query(
+            `INSERT INTO cg_tamil_preview_slots (session_id, class_id, subject_id, staff_id, day_order, period, hours_per_week)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [
+              sessionId,
+              Number(slot.class_id),
+              Number(subjectId),
+              slot.staff_id ? Number(slot.staff_id) : null,
+              Number(slot.day_order),
+              Number(slot.period),
+              Number(hoursAssignments[slot.class_id] || 1),
+            ]
+          );
+        } catch (insertErr) {
+          console.error('Failed to insert slot:', insertErr);
+        }
+      }
+
+      res.json({ sessionId, slots: schedule.scheduled_slots, slotCount: schedule.scheduled_slots.length });
+    } catch (e: any) {
+      console.error('Tamil scheduling error:', e);
+      res.status(500).json({ error: e.message || 'Tamil scheduling failed' });
+    }
+  });
+
+  app.get('/api/tamil/preview/:sessionId', async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+      const rows = await pool.query(
+        `SELECT id, session_id, class_id, subject_id, staff_id, day_order, period, hours_per_week
+         FROM cg_tamil_preview_slots
+         WHERE session_id = $1
+         ORDER BY class_id, day_order, period`,
+        [sessionId]
+      );
+      res.json(rows.rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/tamil/fix/:sessionId', async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+
+      await inTransaction(async client => {
+        const previewRows = await client.query(
+          `SELECT class_id, subject_id, staff_id, day_order, period, hours_per_week
+           FROM cg_tamil_preview_slots
+           WHERE session_id = $1`,
+          [sessionId]
+        );
+
+        for (const row of previewRows.rows as any[]) {
+          await client.query(
+            `INSERT INTO cg_timetable_slots (class_id, subject_id, staff_id, day_order, period, type)
+             VALUES ($1, $2, $3, $4, $5, 'tamil')
+             ON CONFLICT (class_id, day_order, period) DO UPDATE
+             SET subject_id = EXCLUDED.subject_id, staff_id = EXCLUDED.staff_id, type = EXCLUDED.type`,
+            [row.class_id, row.subject_id, row.staff_id, row.day_order, row.period]
+          );
+        }
+
+        await client.query('DELETE FROM cg_tamil_preview_slots WHERE session_id = $1', [sessionId]);
+      });
+
+      res.json({ success: true, message: 'Tamil slots finalized' });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/tamil/regenerate/:sessionId', async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+
+      // Fetch existing preview slots
+      const previewRows = await pool.query(
+        `SELECT class_id, subject_id, staff_id, day_order, period, hours_per_week
+         FROM cg_tamil_preview_slots
+         WHERE session_id = $1`,
+        [sessionId]
+      );
+
+      if (previewRows.rows.length === 0) {
+        return res.status(404).json({ error: 'Preview session not found' });
+      }
+
+      // Extract metadata from preview slots
+      const previewSlots = previewRows.rows as any[];
+      const selectedClassIds = [...new Set(previewSlots.map(s => s.class_id))];
+      const subjectId = previewSlots[0]?.subject_id;
+      const staffAssignments: Record<string, number> = {};
+      const hoursAssignments: Record<string, number> = {};
+
+      for (const slot of previewSlots) {
+        if (slot.staff_id && !staffAssignments[slot.class_id]) {
+          staffAssignments[slot.class_id] = slot.staff_id;
+        }
+        if (!hoursAssignments[slot.class_id]) {
+          hoursAssignments[slot.class_id] = slot.hours_per_week;
+        }
+      }
+
+      // Get class details
+      const classRows = await pool.query(
+        `SELECT id, dept_id, year FROM cg_classes WHERE id = ANY($1::int[])`,
+        [selectedClassIds]
+      );
+      const classDetails = classRows.rows as Array<{ id: number; dept_id: number; year: number }>;
+
+      // Get settings
+      const settingsRows = await pool.query('SELECT key, value FROM cg_settings');
+      const settings = settingsRows.rows.reduce((acc: Record<string, string>, row: any) => {
+        acc[row.key] = row.value;
+        return acc;
+      }, {});
+      const periodsPerDay = Math.max(1, Number(settings.periods_per_day || 6));
+
+      // Get occupied slots (excluding Tamil preview)
+      const occupiedRows = await pool.query(
+        `SELECT class_id, day_order, period FROM cg_timetable_slots WHERE class_id = ANY($1::int[])`,
+        [selectedClassIds]
+      );
+
+      const occupied: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const classId of selectedClassIds) {
+        occupied[String(classId)] = [];
+      }
+      for (const row of occupiedRows.rows as any[]) {
+        occupied[String(row.class_id)].push({ day_order: row.day_order, period: row.period });
+      }
+
+      // Run scheduler
+      const schedule = await runTamilScheduler({
+        selected_classes: classDetails,
+        staff_assignments: staffAssignments,
+        hours_assignments: hoursAssignments,
+        days: [1, 2, 3, 4, 5, 6],
+        periods_per_day: periodsPerDay,
+        occupied_slots: occupied,
+        subject_id: Number(subjectId),
+      });
+
+      if (schedule.error) {
+        return res.status(400).json({ error: schedule.error });
+      }
+
+      if (!schedule.scheduled_slots || !Array.isArray(schedule.scheduled_slots)) {
+        return res.status(400).json({ error: 'Scheduler returned invalid slots format' });
+      }
+
+      if (schedule.scheduled_slots.length === 0) {
+        return res.status(400).json({ error: 'No available slots found for regeneration' });
+      }
+
+      // Delete old preview slots and insert new ones
+      await pool.query('DELETE FROM cg_tamil_preview_slots WHERE session_id = $1', [sessionId]);
+
+      for (const slot of schedule.scheduled_slots) {
+        try {
+          await pool.query(
+            `INSERT INTO cg_tamil_preview_slots (session_id, class_id, subject_id, staff_id, day_order, period, hours_per_week)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [
+              sessionId,
+              Number(slot.class_id),
+              Number(subjectId),
+              slot.staff_id ? Number(slot.staff_id) : null,
+              Number(slot.day_order),
+              Number(slot.period),
+              Number(hoursAssignments[slot.class_id] || 1),
+            ]
+          );
+        } catch (insertErr) {
+          console.error('Failed to insert regenerated slot:', insertErr);
+        }
+      }
+
+      res.json({ success: true, message: 'Timetable regenerated successfully', slotCount: schedule.scheduled_slots.length });
+    } catch (e: any) {
+      console.error('Tamil regeneration error:', e);
+      res.status(500).json({ error: e.message || 'Tamil regeneration failed' });
     }
   });
 

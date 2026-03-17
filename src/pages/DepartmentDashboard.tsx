@@ -202,28 +202,40 @@ export default function DepartmentDashboard() {
       return;
     }
 
-    const requests = selectedTamilClassIds.map(classId =>
-      fetch(`/api/classes/${classId}/subjects`, {
+    const staffAssignments: Record<number, number> = {};
+    const hoursAssignments: Record<number, number> = {};
+
+    for (const classId of selectedTamilClassIds) {
+      hoursAssignments[classId] = parseInt(hoursByTamilClass[classId], 10);
+      if (staffByTamilClass[classId]) {
+        staffAssignments[classId] = Number(staffByTamilClass[classId]);
+      }
+    }
+
+    try {
+      const scheduleRes = await fetch('/api/tamil/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          subject_id: tamilSubject.id,
-          staff_id: staffByTamilClass[classId] ? Number(staffByTamilClass[classId]) : null,
-          hours_per_week: parseInt(hoursByTamilClass[classId], 10),
-          is_lab_required: false,
+          selectedClassIds: selectedTamilClassIds,
+          staffAssignments,
+          hoursAssignments,
+          subjectId: tamilSubject.id,
         })
-      })
-    );
+      });
 
-    const results = await Promise.all(requests);
-    const hasFailure = results.some(res => !res.ok);
+      const scheduleData = await scheduleRes.json();
 
-    if (hasFailure) {
-      setStatus({ type: 'error', msg: 'Failed to add Tamil to one or more selected classes.' });
-      return;
+      if (!scheduleRes.ok) {
+        setStatus({ type: 'error', msg: scheduleData.error || 'Failed to schedule Tamil' });
+        return;
+      }
+
+      setStatus({ type: 'success', msg: `Tamil schedule generated. Redirecting to preview...` });
+      setTimeout(() => navigate(`/tamil/preview/${scheduleData.sessionId}`), 1000);
+    } catch (err: any) {
+      setStatus({ type: 'error', msg: err.message });
     }
-
-    setStatus({ type: 'success', msg: 'Tamil added to selected classes with the configured hours/week.' });
   };
 
   return (
