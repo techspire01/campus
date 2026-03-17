@@ -1,8 +1,11 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Department, Class, Staff } from '../types';
-import { Plus, GraduationCap, ChevronRight, BarChart3 } from 'lucide-react';
+import { Plus, GraduationCap, ChevronRight, BarChart3, Lock } from 'lucide-react';
 import { clsx } from 'clsx';
+
+// Departments where class creation is disabled
+const RESTRICTED_DEPARTMENTS = ['tamil', 'english', 'mathematics'];
 
 export default function DepartmentDashboard() {
   const { id } = useParams();
@@ -93,6 +96,8 @@ export default function DepartmentDashboard() {
 
   if (!dept) return <div className="text-cyan-400 font-mono">Loading department data...</div>;
 
+  const isClassCreationDisabled = RESTRICTED_DEPARTMENTS.includes(dept.name.toLowerCase());
+
   return (
     <div className="space-y-12">
       <header className="flex justify-between items-end border-b border-[#1e2d47] pb-6">
@@ -123,41 +128,51 @@ export default function DepartmentDashboard() {
               </div>
             </div>
             <div className="p-6">
-              <div className="grid grid-cols-1 md:grid-cols-5 gap-2 mb-6">
-                <input
-                  placeholder="Class Name"
-                  className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
-                  value={newClass.name}
-                  onChange={e => setNewClass({ ...newClass, name: e.target.value })}
-                />
-                <select
-                  className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
-                  value={newClass.year}
-                  onChange={e => setNewClass({ ...newClass, year: parseInt(e.target.value) || 1 })}
-                >
-                  <option value={1}>Year 1</option>
-                  <option value={2}>Year 2</option>
-                  <option value={3}>Year 3</option>
-                </select>
-                <input
-                  type="number"
-                  placeholder="Strength"
-                  className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
-                  value={newClass.student_strength || ''}
-                  onChange={e => setNewClass({ ...newClass, student_strength: parseInt(e.target.value) || 0 })}
-                />
-                <select
-                  className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
-                  value={newClass.tutor_staff_id}
-                  onChange={e => setNewClass({ ...newClass, tutor_staff_id: e.target.value })}
-                >
-                  <option value="">Assign Tutor</option>
-                  {departmentStaff.map(member => <option key={member.id} value={member.id}>{member.name}</option>)}
-                </select>
-                <button onClick={handleAddClass} className="bg-cyan-600 p-2 rounded hover:bg-cyan-500 transition-colors flex items-center justify-center gap-2 font-mono text-xs font-bold">
-                  <Plus size={18} /> ADD CLASS
-                </button>
-              </div>
+              {isClassCreationDisabled ? (
+                <div className="mb-6 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-4 flex items-center gap-3">
+                  <Lock className="text-amber-500" size={20} />
+                  <div>
+                    <div className="text-sm font-mono font-bold text-amber-400 uppercase">Class Creation Disabled</div>
+                    <p className="text-xs text-amber-300 mt-1">This department cannot create new classes.</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-2 mb-6">
+                  <input
+                    placeholder="Class Name"
+                    className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                    value={newClass.name}
+                    onChange={e => setNewClass({ ...newClass, name: e.target.value })}
+                  />
+                  <select
+                    className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                    value={newClass.year}
+                    onChange={e => setNewClass({ ...newClass, year: parseInt(e.target.value) || 1 })}
+                  >
+                    <option value={1}>Year 1</option>
+                    <option value={2}>Year 2</option>
+                    <option value={3}>Year 3</option>
+                  </select>
+                  <input
+                    type="number"
+                    placeholder="Strength"
+                    className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                    value={newClass.student_strength || ''}
+                    onChange={e => setNewClass({ ...newClass, student_strength: parseInt(e.target.value) || 0 })}
+                  />
+                  <select
+                    className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                    value={newClass.tutor_staff_id}
+                    onChange={e => setNewClass({ ...newClass, tutor_staff_id: e.target.value })}
+                  >
+                    <option value="">Assign Tutor</option>
+                    {departmentStaff.map(member => <option key={member.id} value={member.id}>{member.name}</option>)}
+                  </select>
+                  <button onClick={handleAddClass} className="bg-cyan-600 p-2 rounded hover:bg-cyan-500 transition-colors flex items-center justify-center gap-2 font-mono text-xs font-bold">
+                    <Plus size={18} /> ADD CLASS
+                  </button>
+                </div>
+              )}
 
               {status && (
                 <div className={clsx(
