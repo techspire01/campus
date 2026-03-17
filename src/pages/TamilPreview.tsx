@@ -34,6 +34,13 @@ interface ExistingSlot {
   type?: string | null;
 }
 
+interface StaffBusySlot {
+  class_id: number;
+  staff_id: number;
+  day_order: number;
+  period: number;
+}
+
 interface DragState {
   sourceDay: number;
   sourcePeriod: number;
@@ -45,6 +52,7 @@ export default function TamilPreview() {
   const navigate = useNavigate();
   const [previewSlots, setPreviewSlots] = useState<TamilSlot[]>([]);
   const [timetableSlots, setTimetableSlots] = useState<ExistingSlot[]>([]);
+  const [staffBusySlots, setStaffBusySlots] = useState<StaffBusySlot[]>([]);
   const [classes, setClasses] = useState<Class[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [isEditing, setIsEditing] = useState(false);
@@ -87,6 +95,7 @@ export default function TamilPreview() {
       const data = await res.json();
       setPreviewSlots(Array.isArray(data?.previewSlots) ? data.previewSlots : []);
       setTimetableSlots(Array.isArray(data?.timetableSlots) ? data.timetableSlots : []);
+      setStaffBusySlots(Array.isArray(data?.staffBusySlots) ? data.staffBusySlots : []);
     } catch (err: any) {
       setStatus({ type: 'error', msg: `Failed to load preview: ${err.message}` });
     } finally {
@@ -153,7 +162,8 @@ export default function TamilPreview() {
 
     const targetPreviewSlot = previewSlots.find(s => s.class_id === classId && s.day_order === targetDay && s.period === targetPeriod);
     const existingSlot = timetableSlots.find(s => s.class_id === classId && s.day_order === targetDay && s.period === targetPeriod);
-    if (existingSlot || targetPreviewSlot) return;
+    const staffBusySlot = staffBusySlots.find(s => s.class_id === classId && s.day_order === targetDay && s.period === targetPeriod);
+    if (existingSlot || targetPreviewSlot || staffBusySlot) return;
     if (!(targetDay !== dragState.sourceDay || targetPeriod !== dragState.sourcePeriod)) return;
 
     // Move the slot
@@ -424,8 +434,10 @@ export default function TamilPreview() {
                       {periods.map(period => {
                         const previewSlot = classGroup.preview.find(s => s.day_order === day && s.period === period);
                         const existingSlot = classGroup.existing.find(s => s.day_order === day && s.period === period);
+                        const staffBusySlot = staffBusySlots.find(s => s.class_id === classId && s.day_order === day && s.period === period);
                         const isTamil = !!previewSlot;
                         const isOccupied = !!previewSlot || !!existingSlot;
+                        const isBlockedByStaff = !!staffBusySlot && !isOccupied;
                         const slotTitle = isTamil
                           ? 'Tamil'
                           : existingSlot?.type === 'placement'
@@ -445,9 +457,9 @@ export default function TamilPreview() {
                             <td
                               className={clsx(
                                 'p-2 transition-colors',
-                                isEditing && !isOccupied ? 'hover:bg-cyan-500/10' : ''
+                                isEditing && !isOccupied && !isBlockedByStaff ? 'hover:bg-cyan-500/10' : ''
                               )}
-                              onDragOver={isEditing && !isOccupied ? (e) => handleDragOver(e as any) : undefined}
+                              onDragOver={isEditing && !isOccupied && !isBlockedByStaff ? (e) => handleDragOver(e as any) : undefined}
                               onDrop={isEditing ? (e) => handleDrop(e, day, period, classId) : undefined}
                             >
                               {isOccupied ? (
@@ -479,6 +491,10 @@ export default function TamilPreview() {
                                       {slotMeta}
                                     </div>
                                   )}
+                                </div>
+                              ) : isBlockedByStaff ? (
+                                <div className="min-h-[80px] p-2 rounded border border-amber-500/20 bg-amber-500/5 flex items-center justify-center">
+                                  <span className="text-[10px] font-mono text-amber-400 uppercase tracking-widest">Staff Busy</span>
                                 </div>
                               ) : (
                                 <div className="min-h-[80px] p-2 rounded border border-dashed border-[#1e2d47] bg-[#0a0e17] flex items-center justify-center">

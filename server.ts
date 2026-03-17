@@ -881,12 +881,13 @@ function runLabScheduler(payload: LabSchedulerRequest): Promise<LabSchedulerResp
 }
 
 interface TamilSchedulerRequest {
-  selected_classes: Array<{ id: number; dept_id: number; year: number }>;
+  selected_classes: Array<{ id: number; dept_id: number; year: number; name?: string }>;
   staff_assignments: Record<number, number>;
   hours_assignments: Record<number, number>;
   days: number[];
   periods_per_day: number;
   occupied_slots: Record<string, Array<{ day_order: number; period: number }>>;
+  occupied_staff_slots: Record<string, Array<{ day_order: number; period: number }>>;
   subject_id: number;
 }
 
@@ -3277,10 +3278,10 @@ async function startServer() {
       }
 
       const classRows = await pool.query(
-        `SELECT id, dept_id, year FROM cg_classes WHERE id = ANY($1::int[])`,
+        `SELECT id, dept_id, year, name FROM cg_classes WHERE id = ANY($1::int[])`,
         [selectedClassIds]
       );
-      const classDetails = classRows.rows as Array<{ id: number; dept_id: number; year: number }>;
+      const classDetails = classRows.rows as Array<{ id: number; dept_id: number; year: number; name: string }>;
 
       if (classDetails.length === 0) {
         return res.status(400).json({ error: 'No classes found for the given IDs' });
@@ -3306,6 +3307,29 @@ async function startServer() {
         occupied[String(row.class_id)].push({ day_order: row.day_order, period: row.period });
       }
 
+      const assignedStaffIds = [...new Set(
+        Object.values(staffAssignments)
+          .map(value => Number(value))
+          .filter(value => Number.isFinite(value) && value > 0)
+      )];
+      const occupiedStaff: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const staffId of assignedStaffIds) {
+        occupiedStaff[String(staffId)] = [];
+      }
+      if (assignedStaffIds.length > 0) {
+        const staffOccupiedRows = await pool.query(
+          `SELECT staff_id, day_order, period
+           FROM cg_timetable_slots
+           WHERE staff_id = ANY($1::int[])`,
+          [assignedStaffIds]
+        );
+        for (const row of staffOccupiedRows.rows as any[]) {
+          if (!row.staff_id) continue;
+          occupiedStaff[String(row.staff_id)] ??= [];
+          occupiedStaff[String(row.staff_id)].push({ day_order: row.day_order, period: row.period });
+        }
+      }
+
       const schedule = await runTamilScheduler({
         selected_classes: classDetails,
         staff_assignments: staffAssignments,
@@ -3313,6 +3337,7 @@ async function startServer() {
         days: [1, 2, 3, 4, 5, 6],
         periods_per_day: periodsPerDay,
         occupied_slots: occupied,
+        occupied_staff_slots: occupiedStaff,
         subject_id: Number(subjectId),
       });
 
@@ -3375,6 +3400,7 @@ async function startServer() {
 
       const classIds = [...new Set((previewRows.rows as any[]).map(row => Number(row.class_id)).filter(Boolean))];
       let timetableRows: any[] = [];
+      let staffBusyRows: any[] = [];
 
       if (classIds.length > 0) {
         const timetableResult = await pool.query(
@@ -3391,9 +3417,39 @@ async function startServer() {
           [classIds]
         );
         timetableRows = timetableResult.rows;
+
+        const previewStaffIds = [...new Set(
+          (previewRows.rows as any[])
+            .map(row => Number(row.staff_id))
+            .filter(value => Number.isFinite(value) && value > 0)
+        )];
+        if (previewStaffIds.length > 0) {
+          const staffBusyResult = await pool.query(
+            `SELECT staff_id, class_id, day_order, period
+             FROM cg_timetable_slots
+             WHERE staff_id = ANY($1::int[])`,
+            [previewStaffIds]
+          );
+          const classToStaff = new Map<number, number>();
+          for (const row of previewRows.rows as any[]) {
+            if (row.staff_id) classToStaff.set(Number(row.class_id), Number(row.staff_id));
+          }
+          for (const [classId, staffId] of classToStaff.entries()) {
+            for (const row of staffBusyResult.rows as any[]) {
+              if (Number(row.staff_id) !== staffId) continue;
+              if (Number(row.class_id) === classId) continue;
+              staffBusyRows.push({
+                class_id: classId,
+                staff_id: staffId,
+                day_order: Number(row.day_order),
+                period: Number(row.period),
+              });
+            }
+          }
+        }
       }
 
-      res.json({ previewSlots: previewRows.rows, timetableSlots: timetableRows });
+      res.json({ previewSlots: previewRows.rows, timetableSlots: timetableRows, staffBusySlots: staffBusyRows });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -3490,11 +3546,39 @@ async function startServer() {
             row => `${row.class_id}-${row.day_order}-${row.period}`
           )
         );
+        const staffIds = [...new Set(
+          finalPreviewRows
+            .map(row => row.staff_id ? Number(row.staff_id) : 0)
+            .filter(value => value > 0)
+        )];
+        const staffOccupiedKeys = new Set<string>();
+        if (staffIds.length > 0) {
+          const staffOccupiedRows = await client.query(
+            `SELECT staff_id, class_id, day_order, period
+             FROM cg_timetable_slots
+             WHERE staff_id = ANY($1::int[])`,
+            [staffIds]
+          );
+          for (const row of staffOccupiedRows.rows as Array<{ staff_id: number; class_id: number; day_order: number; period: number }>) {
+            staffOccupiedKeys.add(`${row.staff_id}-${row.day_order}-${row.period}`);
+          }
+        }
+        const previewStaffKeys = new Set<string>();
 
         for (const row of finalPreviewRows) {
           const key = `${row.class_id}-${row.day_order}-${row.period}`;
           if (occupiedKeys.has(key)) {
             throw new Error(`Tamil slot conflicts with an occupied timetable slot at Day ${row.day_order} Period ${row.period} for class ${row.class_id}.`);
+          }
+          if (row.staff_id) {
+            const staffKey = `${row.staff_id}-${row.day_order}-${row.period}`;
+            if (staffOccupiedKeys.has(staffKey)) {
+              throw new Error(`Tamil slot conflicts with the assigned staff timetable at Day ${row.day_order} Period ${row.period} for staff ${row.staff_id}.`);
+            }
+            if (previewStaffKeys.has(staffKey)) {
+              throw new Error(`Tamil preview creates a staff overlap at Day ${row.day_order} Period ${row.period} for staff ${row.staff_id}.`);
+            }
+            previewStaffKeys.add(staffKey);
           }
         }
 
@@ -3551,10 +3635,10 @@ async function startServer() {
 
       // Get class details
       const classRows = await pool.query(
-        `SELECT id, dept_id, year FROM cg_classes WHERE id = ANY($1::int[])`,
+        `SELECT id, dept_id, year, name FROM cg_classes WHERE id = ANY($1::int[])`,
         [selectedClassIds]
       );
-      const classDetails = classRows.rows as Array<{ id: number; dept_id: number; year: number }>;
+      const classDetails = classRows.rows as Array<{ id: number; dept_id: number; year: number; name: string }>;
 
       // Get settings
       const settingsRows = await pool.query('SELECT key, value FROM cg_settings');
@@ -3578,6 +3662,29 @@ async function startServer() {
         occupied[String(row.class_id)].push({ day_order: row.day_order, period: row.period });
       }
 
+      const assignedStaffIds = [...new Set(
+        Object.values(staffAssignments)
+          .map(value => Number(value))
+          .filter(value => Number.isFinite(value) && value > 0)
+      )];
+      const occupiedStaff: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const staffId of assignedStaffIds) {
+        occupiedStaff[String(staffId)] = [];
+      }
+      if (assignedStaffIds.length > 0) {
+        const staffOccupiedRows = await pool.query(
+          `SELECT staff_id, day_order, period
+           FROM cg_timetable_slots
+           WHERE staff_id = ANY($1::int[])`,
+          [assignedStaffIds]
+        );
+        for (const row of staffOccupiedRows.rows as any[]) {
+          if (!row.staff_id) continue;
+          occupiedStaff[String(row.staff_id)] ??= [];
+          occupiedStaff[String(row.staff_id)].push({ day_order: row.day_order, period: row.period });
+        }
+      }
+
       // Run scheduler
       const schedule = await runTamilScheduler({
         selected_classes: classDetails,
@@ -3586,6 +3693,7 @@ async function startServer() {
         days: [1, 2, 3, 4, 5, 6],
         periods_per_day: periodsPerDay,
         occupied_slots: occupied,
+        occupied_staff_slots: occupiedStaff,
         subject_id: Number(subjectId),
       });
 

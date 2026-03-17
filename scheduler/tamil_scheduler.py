@@ -16,6 +16,19 @@ def build_occupied_map(raw_occupied):
     return occupied
 
 
+def build_staff_occupied_map(raw_occupied):
+    """Build a set of (day_order, period) tuples that are already occupied per staff."""
+    occupied = {}
+    for staff_id_str, slots in raw_occupied.items():
+        staff_id = int(staff_id_str)
+        occupied[staff_id] = set()
+        for item in slots:
+            day_order = int(item["day_order"])
+            period = int(item["period"])
+            occupied[staff_id].add((day_order, period))
+    return occupied
+
+
 def get_available_slots(class_id, days, periods_per_day, hours_needed, occupied):
     """Return all possible slot combinations (day, start_period) for consecutive hours."""
     class_occupied = occupied.get(class_id, set())
@@ -59,10 +72,10 @@ def get_slots_in_period_range(available_slots, min_period, max_period):
     return filtered
 
 
-def solve_tamil_scheduling_split(selected_classes, staff_assignments, hours_assignments, days, periods_per_day, occupied):
+def solve_tamil_scheduling_split(selected_classes, staff_assignments, hours_assignments, days, periods_per_day, occupied, staff_occupied):
     """Allocate Tamil slots split between morning and afternoon halves with staff constraints."""
     result_slots = []
-    staff_schedule = {}  # staff_id -> set of (day, period)
+    staff_schedule = {staff_id: set(slots) for staff_id, slots in staff_occupied.items()}  # staff_id -> set of (day, period)
     unscheduled_classes = []
     
     # Shuffle classes for random allocation
@@ -78,6 +91,10 @@ def solve_tamil_scheduling_split(selected_classes, staff_assignments, hours_assi
         
         available = get_available_slots(class_id, days, periods_per_day, 1, occupied)
         if not available:
+            class_label = class_data.get("name") or f'class {class_id}'
+            unscheduled_classes.append(
+                f"{class_label}: allocated 0 of {total_hours} Tamil hour(s)"
+            )
             continue
         
         # Split hours between morning and afternoon
@@ -182,7 +199,8 @@ if __name__ == "__main__":
             hours_assignments=input_data.get("hours_assignments", {}),
             days=input_data.get("days", list(range(1, 6))),
             periods_per_day=input_data.get("periods_per_day", 8),
-            occupied=input_data.get("occupied_slots", {}),
+            occupied=build_occupied_map(input_data.get("occupied_slots", {})),
+            staff_occupied=build_staff_occupied_map(input_data.get("occupied_staff_slots", {})),
         )
         print(json.dumps(result))
         sys.stdout.flush()
