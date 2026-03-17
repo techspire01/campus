@@ -215,6 +215,7 @@ type LabSchedulerRequest = {
   classes: Array<{
     id: number;
     class_id: number;
+    class_name?: string;
     subject_id: number;
     subject_name?: string;
     subject_code?: string;
@@ -232,6 +233,10 @@ type LabSchedulerRequest = {
     name: string;
     dept_id?: number | null;
     dept_name?: string | null;
+  }>;
+  preferences?: Array<{
+    match_text: string;
+    preferred_lab: string;
   }>;
   periods_per_day: number;
   days: number[];
@@ -254,8 +259,401 @@ type LabSchedulerResponse =
         preview_group: string;
       }>;
       unassigned?: number[];
+      preference_notes?: Array<{
+        lab_requirement_id: number;
+        class_name: string;
+        subject_name: string;
+        preferred_lab: string;
+        allocated_lab: string | null;
+        reason: string;
+      }>;
+      preference_warnings?: string[];
     }
   | { ok: false; error: string };
+
+type LabAiSuggestion = {
+  lab_requirement_id: number;
+  class_id: number;
+  subject_id: number;
+  lab_id: number;
+  day_order: number;
+  period: number;
+  reason?: string;
+};
+
+type AiAssistantResult = {
+  suggestions: LabAiSuggestion[];
+  warning?: string;
+};
+
+type LabAssignmentRow = {
+  lab_requirement_id: number;
+  class_id: number;
+  subject_id: number;
+  lab_id: number;
+  day_order: number;
+  period: number;
+  preview_group: string;
+};
+
+function extractMessageText(content: any): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    const textParts = content
+      .map(item => {
+        if (typeof item === 'string') return item;
+        if (item && typeof item === 'object') {
+          if (typeof item.text === 'string') return item.text;
+          if (typeof item.content === 'string') return item.content;
+        }
+        return '';
+      })
+      .filter(Boolean);
+    return textParts.join('\n');
+  }
+  if (content && typeof content === 'object') {
+    if (typeof content.text === 'string') return content.text;
+    if (typeof content.content === 'string') return content.content;
+  }
+  return '';
+}
+
+function extractJsonArrayFromText(text: string): any[] {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return [];
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && typeof parsed === 'object') {
+      const candidates = [
+        parsed.suggestions,
+        parsed.ai_suggestions,
+        parsed.data,
+        parsed.result,
+      ];
+      for (const candidate of candidates) {
+        if (Array.isArray(candidate)) return candidate;
+      }
+    }
+  } catch {
+    // Continue with fallback parsing.
+  }
+
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenceMatch?.[1]) {
+    try {
+      const parsed = JSON.parse(fenceMatch[1]);
+      if (Array.isArray(parsed)) return parsed;
+      if (parsed && typeof parsed === 'object') {
+        const candidates = [
+          parsed.suggestions,
+          parsed.ai_suggestions,
+          parsed.data,
+          parsed.result,
+        ];
+        for (const candidate of candidates) {
+          if (Array.isArray(candidate)) return candidate;
+        }
+      }
+    } catch {
+      // Continue with bracket extraction.
+    }
+  }
+
+  const firstBracket = trimmed.indexOf('[');
+  const lastBracket = trimmed.lastIndexOf(']');
+  if (firstBracket >= 0 && lastBracket > firstBracket) {
+    const candidate = trimmed.slice(firstBracket, lastBracket + 1);
+    try {
+      const parsed = JSON.parse(candidate);
+      if (Array.isArray(parsed)) return parsed;
+    } catch {
+      return [];
+    }
+  }
+
+  return [];
+}
+
+function extractSuggestionObjectsFromLooseText(text: string): any[] {
+  const raw = String(text || '');
+  if (!raw.trim()) return [];
+
+  const objectMatches = raw.match(/\{[^{}]*\}/g) || [];
+  const parsed: any[] = [];
+
+  const readIntField = (objText: string, field: string): number => {
+    const pattern = new RegExp(`["']?${field}["']?\\s*[:=]\\s*([0-9]+)`, 'i');
+    const match = objText.match(pattern);
+    return match ? Number(match[1]) : 0;
+  };
+
+  const readReasonField = (objText: string): string | undefined => {
+    const match = objText.match(/["']?reason["']?\s*[:=]\s*["']([^"']+)["']/i);
+    return match?.[1] ? String(match[1]) : undefined;
+  };
+
+  for (const objText of objectMatches) {
+    const suggestion = {
+      lab_requirement_id: readIntField(objText, 'lab_requirement_id') || readIntField(objText, 'requirement_id') || readIntField(objText, 'id'),
+      class_id: readIntField(objText, 'class_id'),
+      subject_id: readIntField(objText, 'subject_id'),
+      lab_id: readIntField(objText, 'lab_id'),
+      day_order: readIntField(objText, 'day_order') || readIntField(objText, 'day'),
+      period: readIntField(objText, 'period'),
+      reason: readReasonField(objText),
+    };
+    if (
+      suggestion.lab_requirement_id > 0 &&
+      suggestion.class_id > 0 &&
+      suggestion.subject_id > 0 &&
+      suggestion.lab_id > 0 &&
+      suggestion.day_order > 0 &&
+      suggestion.period > 0
+    ) {
+      parsed.push(suggestion);
+    }
+  }
+
+  return parsed;
+}
+
+function normalizeAiSuggestions(raw: any[]): LabAiSuggestion[] {
+  const toInt = (value: any): number => {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.trunc(n) : 0;
+  };
+
+  const suggestions: LabAiSuggestion[] = [];
+  for (const item of raw) {
+    const reqId = toInt(item?.lab_requirement_id || item?.requirement_id || item?.id);
+    const classId = toInt(item?.class_id);
+    const subjectId = toInt(item?.subject_id);
+    const labId = toInt(item?.lab_id);
+    const day = toInt(item?.day_order || item?.day);
+    const period = toInt(item?.period);
+    if (reqId < 1 || classId < 1 || subjectId < 1 || labId < 1 || day < 1 || period < 1) continue;
+    suggestions.push({
+      lab_requirement_id: reqId,
+      class_id: classId,
+      subject_id: subjectId,
+      lab_id: labId,
+      day_order: day,
+      period,
+      reason: item?.reason ? String(item.reason) : undefined,
+    });
+  }
+
+  return suggestions;
+}
+
+async function askAiForLabSuggestions(context: {
+  classes: LabSchedulerRequest['classes'];
+  labs: LabSchedulerRequest['labs'];
+  unassignedRequirementIds: number[];
+  targetRequirementIds?: number[];
+  userInstruction?: string;
+  preferenceNotes: Array<{
+    lab_requirement_id: number;
+    class_name: string;
+    subject_name: string;
+    preferred_lab: string;
+    allocated_lab: string | null;
+    reason: string;
+  }>;
+  periodsPerDay: number;
+  days: number[];
+}): Promise<AiAssistantResult> {
+  const hfKey = process.env.HUGGINGFACE_API_KEY;
+  const deepSeekKey = process.env.DEEPSEEK_API_KEY;
+  const apiKey = hfKey || deepSeekKey;
+  if (!apiKey) {
+    return {
+      suggestions: [],
+      warning: 'AI provider is not configured. Add HUGGINGFACE_API_KEY (or DEEPSEEK_API_KEY) to .env.',
+    };
+  }
+
+  const usingHuggingFace = Boolean(hfKey);
+  const apiUrl = usingHuggingFace
+    ? (process.env.HUGGINGFACE_API_URL || 'https://router.huggingface.co/v1/chat/completions')
+    : 'https://api.deepseek.com/v1/chat/completions';
+  const model = usingHuggingFace
+    ? (process.env.HUGGINGFACE_MODEL || 'meta-llama/Llama-3.1-8B-Instruct')
+    : (process.env.DEEPSEEK_MODEL || 'deepseek-chat');
+  const providerLabel = usingHuggingFace ? 'Hugging Face' : 'DeepSeek';
+
+  const unresolvedFromPreferences = context.preferenceNotes
+    .filter(note => !note.allocated_lab)
+    .map(note => note.lab_requirement_id);
+
+  const unresolvedIds = new Set<number>(
+    (context.targetRequirementIds && context.targetRequirementIds.length > 0)
+      ? context.targetRequirementIds
+      : [
+          ...context.unassignedRequirementIds,
+          ...unresolvedFromPreferences,
+        ]
+  );
+
+  if (unresolvedIds.size === 0) {
+    return { suggestions: [] };
+  }
+
+  const unresolvedPayload = context.classes.filter(c => unresolvedIds.has(c.id));
+
+  const prompt = [
+    'You are a university timetable optimizer helping with lab conflicts.',
+    'Generate suggestions only for unresolved lab requirements and try to resolve as many as possible.',
+    'Prioritize preferred labs from the preference notes whenever possible.',
+    context.userInstruction ? `User resolution instruction: ${context.userInstruction}` : 'User resolution instruction: none',
+    'Strictly return JSON array, no markdown, no explanation.',
+    'Each object must contain: lab_requirement_id, class_id, subject_id, lab_id, day_order, period, reason.',
+    `Days available: ${JSON.stringify(context.days)}`,
+    `Periods per day: ${context.periodsPerDay}`,
+    `Unresolved requirement IDs: ${JSON.stringify(Array.from(unresolvedIds))}`,
+    `Classes: ${JSON.stringify(unresolvedPayload)}`,
+    `Labs: ${JSON.stringify(context.labs)}`,
+    `Preference conflict notes: ${JSON.stringify(context.preferenceNotes)}`,
+  ].join('\n');
+
+  const response = await fetch(apiUrl, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.1,
+      messages: [
+        { role: 'system', content: 'You output only valid JSON arrays.' },
+        { role: 'user', content: prompt },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    return {
+      suggestions: [],
+      warning: `${providerLabel} request failed (${response.status}): ${body.slice(0, 200)}`,
+    };
+  }
+
+  const payload = await response.json();
+  const content = payload?.choices?.[0]?.message?.content;
+  const rawText = extractMessageText(content);
+  const raw = extractJsonArrayFromText(rawText);
+  const suggestions = normalizeAiSuggestions(raw);
+  if (!suggestions.length) {
+    const loose = extractSuggestionObjectsFromLooseText(rawText);
+    const looseSuggestions = normalizeAiSuggestions(loose);
+    if (looseSuggestions.length) {
+      return { suggestions: looseSuggestions };
+    }
+  }
+  if (!suggestions.length) {
+    const preview = rawText.replace(/\s+/g, ' ').slice(0, 220);
+    return {
+      suggestions: [],
+      warning: `${providerLabel} returned no valid JSON suggestions.${preview ? ` Response preview: ${preview}` : ''}`,
+    };
+  }
+  return { suggestions };
+}
+
+function mergeAiSuggestionsIntoAssignments(params: {
+  baseAssignments: LabAssignmentRow[];
+  aiSuggestions: LabAiSuggestion[];
+  unresolvedRequirementIds: number[];
+  classes: LabSchedulerRequest['classes'];
+  labs: LabSchedulerRequest['labs'];
+  days: number[];
+  periodsPerDay: number;
+  blockedClassSlots: Record<string, Array<{ day_order: number; period: number }>>;
+  blockedLabSlots: Record<string, Array<{ day_order: number; period: number }>>;
+}) {
+  const daySet = new Set(params.days);
+  const unresolvedSet = new Set(params.unresolvedRequirementIds);
+  const classByReq = new Map<number, { class_id: number; subject_id: number }>();
+  for (const c of params.classes) {
+    classByReq.set(c.id, { class_id: c.class_id, subject_id: c.subject_id });
+  }
+
+  const validLabIds = new Set(params.labs.map(l => l.id));
+
+  const classOcc = new Set<string>();
+  const labOcc = new Set<string>();
+
+  const addOcc = (classId: number, labId: number, day: number, period: number) => {
+    classOcc.add(`${classId}:${day}:${period}`);
+    labOcc.add(`${labId}:${day}:${period}`);
+  };
+
+  for (const [classId, slots] of Object.entries(params.blockedClassSlots || {})) {
+    for (const s of slots || []) {
+      classOcc.add(`${Number(classId)}:${Number(s.day_order)}:${Number(s.period)}`);
+    }
+  }
+  for (const [labId, slots] of Object.entries(params.blockedLabSlots || {})) {
+    for (const s of slots || []) {
+      labOcc.add(`${Number(labId)}:${Number(s.day_order)}:${Number(s.period)}`);
+    }
+  }
+
+  for (const a of params.baseAssignments) {
+    addOcc(a.class_id, a.lab_id, a.day_order, a.period);
+  }
+
+  const merged = [...params.baseAssignments];
+  const resolvedByAi = new Set<number>();
+
+  const sortedAi = [...params.aiSuggestions].sort((a, b) => {
+    if (a.lab_requirement_id !== b.lab_requirement_id) return a.lab_requirement_id - b.lab_requirement_id;
+    if (a.day_order !== b.day_order) return a.day_order - b.day_order;
+    return a.period - b.period;
+  });
+
+  for (const s of sortedAi) {
+    if (!unresolvedSet.has(s.lab_requirement_id)) continue;
+    if (!validLabIds.has(s.lab_id)) continue;
+    if (!daySet.has(s.day_order)) continue;
+    if (s.period < 1 || s.period > params.periodsPerDay) continue;
+
+    const mapped = classByReq.get(s.lab_requirement_id);
+    if (!mapped) continue;
+
+    const classId = mapped.class_id;
+    const subjectId = mapped.subject_id;
+
+    const classKey = `${classId}:${s.day_order}:${s.period}`;
+    const labKey = `${s.lab_id}:${s.day_order}:${s.period}`;
+    if (classOcc.has(classKey) || labOcc.has(labKey)) continue;
+
+    merged.push({
+      lab_requirement_id: s.lab_requirement_id,
+      class_id: classId,
+      subject_id: subjectId,
+      lab_id: s.lab_id,
+      day_order: s.day_order,
+      period: s.period,
+      preview_group: `ai_req${s.lab_requirement_id}_d${s.day_order}_p${s.period}_l${s.lab_id}`,
+    });
+    addOcc(classId, s.lab_id, s.day_order, s.period);
+    resolvedByAi.add(s.lab_requirement_id);
+  }
+
+  const remainingUnassigned = params.unresolvedRequirementIds.filter(reqId => !resolvedByAi.has(reqId));
+
+  return {
+    assignments: merged,
+    aiAppliedSlots: merged.length - params.baseAssignments.length,
+    aiResolvedRequirements: Array.from(resolvedByAi).sort((a, b) => a - b),
+    remainingUnassigned,
+  };
+}
 
 type PlacementGroupInfo = {
   segment: 'morning' | 'afternoon';
@@ -1086,6 +1484,17 @@ async function startServer() {
         return Math.trunc(n);
       };
 
+      const rawPreferences = Array.isArray(req.body?.preferences) ? req.body.preferences : [];
+      if (rawPreferences.length > 3) {
+        return res.status(400).json({ error: 'A maximum of 3 preferences is allowed.' });
+      }
+      const preferences = rawPreferences
+        .map((entry: any) => ({
+          match_text: String(entry?.match_text || '').trim(),
+          preferred_lab: String(entry?.preferred_lab || '').trim(),
+        }))
+        .filter((entry: { match_text: string; preferred_lab: string }) => entry.match_text && entry.preferred_lab);
+
       const days = Array.isArray(req.body?.days) && req.body.days.length
         ? req.body.days.map((d: any) => toInt(d, 'days[]')).filter((d: number) => d >= 1)
         : [1, 2, 3, 4, 5, 6];
@@ -1101,6 +1510,7 @@ async function startServer() {
         SELECT
           lr.id,
           lr.class_id,
+          c.name AS class_name,
           lr.subject_id,
           s.name AS subject_name,
           s.code AS subject_code,
@@ -1158,6 +1568,7 @@ async function startServer() {
         classes: reqRows.rows.map((r: any) => ({
           id: toInt(r.id, 'lab_requirement.id'),
           class_id: toInt(r.class_id, 'lab_requirement.class_id'),
+          class_name: r.class_name,
           subject_id: toInt(r.subject_id, 'lab_requirement.subject_id'),
           subject_name: r.subject_name,
           subject_code: r.subject_code,
@@ -1176,6 +1587,7 @@ async function startServer() {
           dept_id: r.dept_id != null ? toInt(r.dept_id, 'lab.dept_id') : null,
           dept_name: r.dept_name,
         })),
+        preferences,
         periods_per_day: periodsPerDay,
         days,
         blocked: {
@@ -1222,6 +1634,8 @@ async function startServer() {
         success: true,
         total_assigned_slots: solved.assignments.length,
         unassigned_requirements: solved.unassigned || [],
+        preference_notes: solved.preference_notes || [],
+        preference_warnings: solved.preference_warnings || [],
       });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -1358,6 +1772,475 @@ async function startServer() {
     }
   });
 
+  app.post('/api/labs/preview/assign-manual', async (req, res) => {
+    try {
+      const { lab_requirement_id, day_order, period, lab_id, hours } = req.body;
+      if (!lab_requirement_id || !day_order || !period || !lab_id) {
+        return res.status(400).json({ error: 'lab_requirement_id, day_order, period, lab_id are required.' });
+      }
+
+      const result = await inTransaction(async client => {
+        const settingsRows = await client.query('SELECT key, value FROM cg_settings');
+        const settings = settingsRows.rows.reduce((acc: Record<string, string>, row: { key: string; value: string }) => {
+          acc[row.key] = row.value;
+          return acc;
+        }, {});
+        const periodsPerDay = Number(settings.periods_per_day || 6);
+
+        const reqRow = await client.query(
+          `SELECT lr.id, lr.class_id, lr.subject_id, COALESCE(lr.duration, cs.hours_per_week, 1) AS required_slots
+           FROM cg_lab_requirements lr
+           LEFT JOIN cg_class_subjects cs ON cs.class_id = lr.class_id AND cs.subject_id = lr.subject_id
+           WHERE lr.id = $1
+           LIMIT 1`,
+          [Number(lab_requirement_id)]
+        );
+
+        if ((reqRow.rowCount ?? 0) === 0) {
+          throw new Error('Lab requirement not found.');
+        }
+
+        const req = reqRow.rows[0] as {
+          id: number;
+          class_id: number;
+          subject_id: number;
+          required_slots: number;
+        };
+
+        const existingCount = await client.query(
+          `SELECT COUNT(*)::int AS count
+           FROM cg_lab_preview_slots
+           WHERE lab_requirement_id = $1 AND status = 'preview'`,
+          [req.id]
+        );
+        const alreadyAssigned = Number(existingCount.rows[0]?.count || 0);
+        const requiredSlots = Number(req.required_slots || 1);
+        if (alreadyAssigned >= requiredSlots) {
+          throw new Error('All required hours for this subject are already assigned in preview.');
+        }
+
+        const requestedHoursRaw = Number(hours || 1);
+        const requestedHours = Number.isFinite(requestedHoursRaw) ? Math.max(1, Math.trunc(requestedHoursRaw)) : 1;
+        const remaining = requiredSlots - alreadyAssigned;
+        const assignHours = Math.min(requestedHours, remaining);
+
+        const startPeriod = Number(period);
+        if (startPeriod + assignHours - 1 > periodsPerDay) {
+          throw new Error(`Only ${Math.max(0, periodsPerDay - startPeriod + 1)} period(s) fit from this start slot on the selected day.`);
+        }
+
+        const targetDay = Number(day_order);
+        const targetLabId = Number(lab_id);
+
+        for (let i = 0; i < assignHours; i += 1) {
+          const targetPeriod = startPeriod + i;
+
+          const classPreviewConflict = await client.query(
+            `SELECT 1 FROM cg_lab_preview_slots
+             WHERE class_id = $1 AND day_order = $2 AND period = $3 AND status = 'preview'
+             LIMIT 1`,
+            [req.class_id, targetDay, targetPeriod]
+          );
+          if ((classPreviewConflict.rowCount ?? 0) > 0) {
+            throw new Error(`Class preview conflict at Day ${targetDay} P${targetPeriod}.`);
+          }
+
+          const labPreviewConflict = await client.query(
+            `SELECT 1 FROM cg_lab_preview_slots
+             WHERE lab_id = $1 AND day_order = $2 AND period = $3 AND status = 'preview'
+             LIMIT 1`,
+            [targetLabId, targetDay, targetPeriod]
+          );
+          if ((labPreviewConflict.rowCount ?? 0) > 0) {
+            throw new Error(`Lab preview conflict at Day ${targetDay} P${targetPeriod}.`);
+          }
+
+          const classFixedConflict = await client.query(
+            `SELECT 1 FROM cg_timetable_slots
+             WHERE class_id = $1 AND day_order = $2 AND period = $3
+             LIMIT 1`,
+            [req.class_id, targetDay, targetPeriod]
+          );
+          if ((classFixedConflict.rowCount ?? 0) > 0) {
+            throw new Error(`Class timetable slot already occupied at Day ${targetDay} P${targetPeriod}.`);
+          }
+
+          const labFixedConflict = await client.query(
+            `SELECT 1 FROM cg_timetable_slots
+             WHERE lab_id = $1 AND day_order = $2 AND period = $3
+             LIMIT 1`,
+            [targetLabId, targetDay, targetPeriod]
+          );
+          if ((labFixedConflict.rowCount ?? 0) > 0) {
+            throw new Error(`Lab timetable slot already occupied at Day ${targetDay} P${targetPeriod}.`);
+          }
+        }
+
+        const previewGroup = `manual_req${req.id}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        for (let i = 0; i < assignHours; i += 1) {
+          await client.query(
+            `INSERT INTO cg_lab_preview_slots
+              (lab_requirement_id, class_id, subject_id, lab_id, day_order, period, preview_group, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'preview')`,
+            [
+              req.id,
+              req.class_id,
+              req.subject_id,
+              targetLabId,
+              targetDay,
+              startPeriod + i,
+              previewGroup,
+            ]
+          );
+        }
+
+        return {
+          lab_requirement_id: req.id,
+          assigned_slots: alreadyAssigned + assignHours,
+          required_slots: requiredSlots,
+          added_slots: assignHours,
+        };
+      });
+
+      res.json({ success: true, ...result });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.delete('/api/labs/preview/remove-manual', async (req, res) => {
+    try {
+      const { preview_slot_id } = req.body;
+      if (!preview_slot_id) {
+        return res.status(400).json({ error: 'preview_slot_id is required.' });
+      }
+
+      const removed = await inTransaction(async client => {
+        const source = await client.query(
+          `SELECT id, lab_requirement_id, preview_group
+           FROM cg_lab_preview_slots
+           WHERE id = $1 AND status = 'preview'
+           LIMIT 1`,
+          [Number(preview_slot_id)]
+        );
+
+        if ((source.rowCount ?? 0) === 0) {
+          throw new Error('Preview slot not found.');
+        }
+
+        const row = source.rows[0] as { lab_requirement_id: number; preview_group: string };
+        const deleted = await client.query(
+          `DELETE FROM cg_lab_preview_slots
+           WHERE status = 'preview' AND lab_requirement_id = $1 AND preview_group = $2
+           RETURNING id`,
+          [row.lab_requirement_id, row.preview_group]
+        );
+        return deleted.rowCount ?? 0;
+      });
+
+      res.json({ success: true, removed_slots: removed });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/labs/preview/apply-ai', async (req, res) => {
+    try {
+      const suggestions = Array.isArray(req.body?.suggestions)
+        ? normalizeAiSuggestions(req.body.suggestions)
+        : [];
+
+      if (!suggestions.length) {
+        return res.status(400).json({ error: 'No valid AI suggestions provided.' });
+      }
+
+      const applied = await inTransaction(async client => {
+        const appliedRows: LabAiSuggestion[] = [];
+        const skipped: Array<{ suggestion: LabAiSuggestion; reason: string }> = [];
+
+        const reqIds = Array.from(new Set(suggestions.map(s => s.lab_requirement_id)));
+        if (reqIds.length > 0) {
+          await client.query(
+            `DELETE FROM cg_lab_preview_slots
+             WHERE status = 'preview' AND lab_requirement_id = ANY($1::int[])`,
+            [reqIds]
+          );
+        }
+
+        for (const s of suggestions) {
+          const reqRow = await client.query(
+            `SELECT lr.id, lr.class_id, lr.subject_id
+             FROM cg_lab_requirements lr
+             WHERE lr.id = $1`,
+            [s.lab_requirement_id]
+          );
+          if ((reqRow.rowCount ?? 0) === 0) {
+            skipped.push({ suggestion: s, reason: 'Lab requirement not found.' });
+            continue;
+          }
+
+          const req = reqRow.rows[0] as { id: number; class_id: number; subject_id: number };
+          const classId = req.class_id;
+          const subjectId = req.subject_id;
+
+          const labExists = await client.query('SELECT 1 FROM cg_labs WHERE id = $1 LIMIT 1', [s.lab_id]);
+          if ((labExists.rowCount ?? 0) === 0) {
+            skipped.push({ suggestion: s, reason: 'Lab not found.' });
+            continue;
+          }
+
+          const classPreviewConflict = await client.query(
+            `SELECT 1 FROM cg_lab_preview_slots
+             WHERE class_id = $1 AND day_order = $2 AND period = $3 AND status = 'preview'
+             LIMIT 1`,
+            [classId, s.day_order, s.period]
+          );
+          if ((classPreviewConflict.rowCount ?? 0) > 0) {
+            skipped.push({ suggestion: s, reason: 'Class preview conflict at target slot.' });
+            continue;
+          }
+
+          const labPreviewConflict = await client.query(
+            `SELECT 1 FROM cg_lab_preview_slots
+             WHERE lab_id = $1 AND day_order = $2 AND period = $3 AND status = 'preview'
+             LIMIT 1`,
+            [s.lab_id, s.day_order, s.period]
+          );
+          if ((labPreviewConflict.rowCount ?? 0) > 0) {
+            skipped.push({ suggestion: s, reason: 'Lab preview conflict at target slot.' });
+            continue;
+          }
+
+          const classFixedConflict = await client.query(
+            `SELECT 1 FROM cg_timetable_slots
+             WHERE class_id = $1 AND day_order = $2 AND period = $3
+             LIMIT 1`,
+            [classId, s.day_order, s.period]
+          );
+          if ((classFixedConflict.rowCount ?? 0) > 0) {
+            skipped.push({ suggestion: s, reason: 'Class timetable slot already occupied.' });
+            continue;
+          }
+
+          const labFixedConflict = await client.query(
+            `SELECT 1 FROM cg_timetable_slots
+             WHERE lab_id = $1 AND day_order = $2 AND period = $3
+             LIMIT 1`,
+            [s.lab_id, s.day_order, s.period]
+          );
+          if ((labFixedConflict.rowCount ?? 0) > 0) {
+            skipped.push({ suggestion: s, reason: 'Lab timetable slot already occupied.' });
+            continue;
+          }
+
+          const previewGroup = `ai_req${s.lab_requirement_id}_d${s.day_order}_p${s.period}_l${s.lab_id}`;
+          await client.query(
+            `INSERT INTO cg_lab_preview_slots
+              (lab_requirement_id, class_id, subject_id, lab_id, day_order, period, preview_group, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'preview')`,
+            [s.lab_requirement_id, classId, subjectId, s.lab_id, s.day_order, s.period, previewGroup]
+          );
+
+          appliedRows.push({
+            ...s,
+            class_id: classId,
+            subject_id: subjectId,
+          });
+        }
+
+        return {
+          applied_rows: appliedRows,
+          skipped,
+        };
+      });
+
+      res.json({
+        success: true,
+        applied: applied.applied_rows.length,
+        skipped: applied.skipped,
+      });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/labs/resolve-with-input', async (req, res) => {
+    try {
+      const instruction = String(req.body?.instruction || '').trim();
+      if (!instruction) {
+        return res.status(400).json({ error: 'instruction is required.' });
+      }
+
+      const toInt = (value: any, name: string): number => {
+        const n = Number(value);
+        if (!Number.isFinite(n)) throw new Error(`Invalid numeric value for ${name}: ${value}`);
+        return Math.trunc(n);
+      };
+
+      const targetRequirementIds = Array.isArray(req.body?.requirement_ids)
+        ? req.body.requirement_ids.map((v: any) => toInt(v, 'requirement_ids[]')).filter((v: number) => v > 0)
+        : [];
+
+      const settingsRows = await pool.query('SELECT key, value FROM cg_settings');
+      const settings = settingsRows.rows.reduce((acc: Record<string, string>, row: { key: string; value: string }) => {
+        acc[row.key] = row.value;
+        return acc;
+      }, {});
+      const periodsPerDay = toInt(settings.periods_per_day || 6, 'periods_per_day');
+      const days = [1, 2, 3, 4, 5, 6];
+
+      const reqRows = await pool.query(`
+        SELECT
+          lr.id,
+          lr.class_id,
+          c.name AS class_name,
+          lr.subject_id,
+          s.name AS subject_name,
+          s.code AS subject_code,
+          c.dept_id AS class_dept_id,
+          d.name AS class_dept_name,
+          COALESCE(lr.duration, cs.hours_per_week) AS lab_hours,
+          lr.requirements,
+          c.student_strength
+        FROM cg_lab_requirements lr
+        JOIN cg_classes c ON c.id = lr.class_id
+        LEFT JOIN cg_departments d ON d.id = c.dept_id
+        JOIN cg_class_subjects cs ON cs.class_id = lr.class_id AND cs.subject_id = lr.subject_id
+        JOIN cg_subjects s ON s.id = lr.subject_id
+        WHERE lr.status IN ('pending', 'assigned')
+      `);
+
+      const labRows = await pool.query(`
+        SELECT l.id, l.name, l.dept_id, d.name AS dept_name, l.systems_count, l.os_installed, l.systems_specification
+        FROM cg_labs l
+        LEFT JOIN cg_departments d ON d.id = l.dept_id
+      `);
+
+      const currentPreview = await pool.query(`
+        SELECT lab_requirement_id, class_id, subject_id, lab_id, day_order, period, preview_group
+        FROM cg_lab_preview_slots
+        WHERE status = 'preview'
+      `);
+
+      const classBusy = await pool.query(`
+        SELECT class_id, day_order, period
+        FROM cg_timetable_slots
+      `);
+      const labBusy = await pool.query(`
+        SELECT lab_id, day_order, period
+        FROM cg_timetable_slots
+        WHERE lab_id IS NOT NULL
+      `);
+
+      const classSlots: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const r of classBusy.rows as Array<{ class_id: number; day_order: number; period: number }>) {
+        const key = String(r.class_id);
+        if (!classSlots[key]) classSlots[key] = [];
+        classSlots[key].push({ day_order: r.day_order, period: r.period });
+      }
+
+      const labSlots: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const r of labBusy.rows as Array<{ lab_id: number; day_order: number; period: number }>) {
+        const key = String(r.lab_id);
+        if (!labSlots[key]) labSlots[key] = [];
+        labSlots[key].push({ day_order: r.day_order, period: r.period });
+      }
+
+      const classesPayload = reqRows.rows.map((r: any) => ({
+        id: toInt(r.id, 'lab_requirement.id'),
+        class_id: toInt(r.class_id, 'lab_requirement.class_id'),
+        class_name: r.class_name,
+        subject_id: toInt(r.subject_id, 'lab_requirement.subject_id'),
+        subject_name: r.subject_name,
+        subject_code: r.subject_code,
+        class_dept_id: r.class_dept_id != null ? toInt(r.class_dept_id, 'class.dept_id') : null,
+        class_dept_name: r.class_dept_name,
+        class_strength: toInt(r.student_strength || 0, 'class.student_strength'),
+        lab_hours: toInt(r.lab_hours || 1, 'lab_requirement.lab_hours'),
+        requirements: r.requirements,
+      }));
+
+      const labsPayload = labRows.rows.map((r: any) => ({
+        id: toInt(r.id, 'lab.id'),
+        systems: toInt(r.systems_count || 0, 'lab.systems_count'),
+        os_installed: r.os_installed,
+        system_spec: r.systems_specification,
+        name: r.name,
+        dept_id: r.dept_id != null ? toInt(r.dept_id, 'lab.dept_id') : null,
+        dept_name: r.dept_name,
+      }));
+
+      const allReqIds = classesPayload.map(c => c.id);
+      const assignedReqIds = new Set<number>((currentPreview.rows as Array<any>).map(r => Number(r.lab_requirement_id)).filter(Number.isFinite));
+      const unresolved = targetRequirementIds.length > 0
+        ? targetRequirementIds
+        : allReqIds.filter(id => !assignedReqIds.has(id));
+
+      const ai = await askAiForLabSuggestions({
+        classes: classesPayload,
+        labs: labsPayload,
+        unassignedRequirementIds: unresolved,
+        targetRequirementIds: unresolved,
+        userInstruction: instruction,
+        preferenceNotes: [],
+        periodsPerDay,
+        days,
+      });
+
+      const baseAssignments = (currentPreview.rows as Array<any>).map(r => ({
+        lab_requirement_id: toInt(r.lab_requirement_id, 'preview.lab_requirement_id'),
+        class_id: toInt(r.class_id, 'preview.class_id'),
+        subject_id: toInt(r.subject_id, 'preview.subject_id'),
+        lab_id: toInt(r.lab_id, 'preview.lab_id'),
+        day_order: toInt(r.day_order, 'preview.day_order'),
+        period: toInt(r.period, 'preview.period'),
+        preview_group: String(r.preview_group || ''),
+      })) as LabAssignmentRow[];
+
+      const merged = mergeAiSuggestionsIntoAssignments({
+        baseAssignments,
+        aiSuggestions: ai.suggestions,
+        unresolvedRequirementIds: unresolved,
+        classes: classesPayload,
+        labs: labsPayload,
+        days,
+        periodsPerDay,
+        blockedClassSlots: classSlots,
+        blockedLabSlots: labSlots,
+      });
+
+      await inTransaction(async client => {
+        await client.query("DELETE FROM cg_lab_preview_slots WHERE status = 'preview'");
+        for (const a of merged.assignments) {
+          await client.query(
+            `INSERT INTO cg_lab_preview_slots
+              (lab_requirement_id, class_id, subject_id, lab_id, day_order, period, preview_group, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'preview')`,
+            [
+              a.lab_requirement_id,
+              a.class_id,
+              a.subject_id,
+              a.lab_id,
+              a.day_order,
+              a.period,
+              a.preview_group,
+            ]
+          );
+        }
+      });
+
+      res.json({
+        success: true,
+        applied_slots: merged.aiAppliedSlots,
+        resolved_requirements: merged.aiResolvedRequirements,
+        remaining_unassigned: merged.remainingUnassigned,
+        ai_warning: ai.warning,
+      });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
   app.post('/api/labs/fix', async (req, res) => {
     try {
       const summary = await inTransaction(async client => {
@@ -1424,6 +2307,39 @@ async function startServer() {
     }
   });
 
+  app.post('/api/labs/unassign-all', async (req, res) => {
+    try {
+      const summary = await inTransaction(async client => {
+        const previewDeleted = await client.query(
+          `DELETE FROM cg_lab_preview_slots WHERE status = 'preview' RETURNING id`
+        );
+
+        const timetableDeleted = await client.query(
+          `DELETE FROM cg_timetable_slots
+           WHERE type = 'lab' OR lab_id IS NOT NULL
+           RETURNING id`
+        );
+
+        const requirementsUpdated = await client.query(
+          `UPDATE cg_lab_requirements
+           SET status = 'pending', lab_id = NULL
+           WHERE status = 'assigned' OR lab_id IS NOT NULL
+           RETURNING id`
+        );
+
+        return {
+          preview_cleared: previewDeleted.rowCount ?? 0,
+          slots_unassigned: timetableDeleted.rowCount ?? 0,
+          requirements_reset: requirementsUpdated.rowCount ?? 0,
+        };
+      });
+
+      res.json({ success: true, ...summary });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
   app.get('/api/timetable/lab/:labId', async (req, res) => {
     try {
       const labId = Number(req.params.labId);
@@ -1441,6 +2357,73 @@ async function startServer() {
       res.json(rows);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.patch('/api/timetable/labs/move', async (req, res) => {
+    try {
+      const { slot_id, to_day, to_period, to_lab_id } = req.body;
+      if (!slot_id || !to_day || !to_period || !to_lab_id) {
+        return res.status(400).json({ error: 'slot_id, to_day, to_period, to_lab_id are required.' });
+      }
+
+      await inTransaction(async client => {
+        const sourceRow = await client.query(
+          `SELECT id, class_id, day_order, period, lab_id
+           FROM cg_timetable_slots
+           WHERE id = $1 AND lab_id IS NOT NULL
+           LIMIT 1`,
+          [Number(slot_id)]
+        );
+        if ((sourceRow.rowCount ?? 0) === 0) {
+          throw new Error('Source timetable slot not found.');
+        }
+
+        const source = sourceRow.rows[0] as {
+          id: number;
+          class_id: number;
+          day_order: number;
+          period: number;
+          lab_id: number;
+        };
+
+        const targetDay = Number(to_day);
+        const targetPeriod = Number(to_period);
+        const targetLabId = Number(to_lab_id);
+
+        const classConflict = await client.query(
+          `SELECT 1
+           FROM cg_timetable_slots
+           WHERE class_id = $1 AND day_order = $2 AND period = $3 AND id <> $4
+           LIMIT 1`,
+          [source.class_id, targetDay, targetPeriod, source.id]
+        );
+        if ((classConflict.rowCount ?? 0) > 0) {
+          throw new Error('Class conflict at target slot.');
+        }
+
+        const labConflict = await client.query(
+          `SELECT 1
+           FROM cg_timetable_slots
+           WHERE lab_id = $1 AND day_order = $2 AND period = $3 AND id <> $4
+           LIMIT 1`,
+          [targetLabId, targetDay, targetPeriod, source.id]
+        );
+        if ((labConflict.rowCount ?? 0) > 0) {
+          throw new Error('Lab conflict at target slot.');
+        }
+
+        await client.query(
+          `UPDATE cg_timetable_slots
+           SET day_order = $1, period = $2, lab_id = $3
+           WHERE id = $4`,
+          [targetDay, targetPeriod, targetLabId, source.id]
+        );
+      });
+
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
     }
   });
 
