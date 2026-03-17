@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Department, Class, Staff } from '../types';
 import { Plus, GraduationCap, ChevronRight, BarChart3 } from 'lucide-react';
@@ -7,6 +7,7 @@ import { clsx } from 'clsx';
 export default function DepartmentDashboard() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const deptId = Number(id);
   const [dept, setDept] = useState<Department | null>(null);
   const [classes, setClasses] = useState<Class[]>([]);
   const [staff, setStaff] = useState<Staff[]>([]);
@@ -19,18 +20,32 @@ export default function DepartmentDashboard() {
   const [strengthDrafts, setStrengthDrafts] = useState<Record<number, string>>({});
   const [status, setStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
 
+  const departmentStaff = useMemo(() => {
+    const scoped = staff.filter(member => member.dept_id === deptId);
+    const unique = new Map<string, Staff>();
+
+    for (const member of scoped) {
+      const key = `${member.name.trim().toLowerCase()}|${member.role}|${member.dept_id ?? 'none'}`;
+      if (!unique.has(key)) {
+        unique.set(key, member);
+      }
+    }
+
+    return Array.from(unique.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [staff, deptId]);
+
   useEffect(() => {
     fetch('/api/departments').then(res => res.json()).then(data => {
-      const department = data.find((item: Department) => item.id === parseInt(id!));
+      const department = data.find((item: Department) => item.id === deptId);
       setDept(department || null);
     });
     fetch('/api/classes').then(res => res.json()).then(data => {
-      setClasses(data.filter((item: Class) => item.dept_id === parseInt(id!)));
+      setClasses(data.filter((item: Class) => item.dept_id === deptId));
     });
     fetch('/api/staff').then(res => res.json()).then(data => {
-      setStaff(data.filter((item: Staff) => item.dept_id === parseInt(id!)));
+      setStaff(data as Staff[]);
     });
-  }, [id]);
+  }, [deptId]);
 
   const handleAddClass = async () => {
     setStatus(null);
@@ -43,7 +58,7 @@ export default function DepartmentDashboard() {
         semester: 1,
         student_strength: newClass.student_strength,
         tutor_staff_id: newClass.tutor_staff_id ? parseInt(newClass.tutor_staff_id) : null,
-        dept_id: parseInt(id!),
+        dept_id: deptId,
       })
     });
     const data = await res.json();
@@ -93,7 +108,7 @@ export default function DepartmentDashboard() {
           </div>
           <div className="bg-[#0f1623] border border-[#1e2d47] p-4 rounded-lg text-center min-w-[120px]">
             <div className="text-[10px] font-mono text-slate-500 uppercase mb-1">Faculty Count</div>
-            <div className="text-2xl font-bold text-white">{staff.length}</div>
+            <div className="text-2xl font-bold text-white">{departmentStaff.length}</div>
           </div>
         </div>
       </header>
@@ -137,7 +152,7 @@ export default function DepartmentDashboard() {
                   onChange={e => setNewClass({ ...newClass, tutor_staff_id: e.target.value })}
                 >
                   <option value="">Assign Tutor</option>
-                  {staff.map(member => <option key={member.id} value={member.id}>{member.name}</option>)}
+                  {departmentStaff.map(member => <option key={member.id} value={member.id}>{member.name}</option>)}
                 </select>
                 <button onClick={handleAddClass} className="bg-cyan-600 p-2 rounded hover:bg-cyan-500 transition-colors flex items-center justify-center gap-2 font-mono text-xs font-bold">
                   <Plus size={18} /> ADD CLASS
@@ -176,7 +191,7 @@ export default function DepartmentDashboard() {
                         onChange={e => handleClassUpdate(item.id, e.target.value, item.student_strength)}
                       >
                         <option value="">Not assigned</option>
-                        {staff.map(member => <option key={member.id} value={member.id}>{member.name}</option>)}
+                        {departmentStaff.map(member => <option key={member.id} value={member.id}>{member.name}</option>)}
                       </select>
                       <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 mt-3">Class Strength</div>
                       {(() => {
@@ -238,7 +253,7 @@ export default function DepartmentDashboard() {
               <h2 className="font-mono font-bold text-white uppercase tracking-wider">Faculty Workload</h2>
             </div>
             <div className="p-6 space-y-4">
-              {staff.map(member => {
+              {departmentStaff.map(member => {
                 const workloadPercent = Math.min(100, ((member.current_workload || 0) / member.max_workload) * 100);
                 return (
                   <div key={member.id} className="space-y-2">
