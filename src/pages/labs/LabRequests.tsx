@@ -79,9 +79,6 @@ export default function LabRequests() {
   const navigate = useNavigate();
   const [items, setItems] = useState<LabOverviewItem[]>([]);
   const [labs, setLabs] = useState<any[]>([]);
-  const [assigningKey, setAssigningKey] = useState<string | null>(null);
-  const [selectedLab, setSelectedLab] = useState<Record<string, string>>({});
-  const [selectedLabSearch, setSelectedLabSearch] = useState<Record<string, string>>({});
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [status, setStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
   const [filter, setFilter] = useState<FilterTab>('all');
@@ -137,32 +134,6 @@ export default function LabRequests() {
 
   const itemKey = (item: LabOverviewItem) => `${item.class_id}-${item.subject_id}`;
   const gridCellKey = (labId: number, day: number, period: number) => `${labId}-${day}-${period}`;
-
-  const toAssignSuggestionValue = (lab: any) => `${String(lab.name || '').trim()} (ID: ${lab.id})`;
-
-  const resolveLabIdFromSearch = (rawValue: string): string | null => {
-    const value = String(rawValue || '').trim();
-    if (!value) return null;
-
-    const idTagMatch = value.match(/\(ID:\s*(\d+)\)\s*$/i);
-    if (idTagMatch) {
-      const taggedId = idTagMatch[1];
-      if (labs.some(l => String(l.id) === taggedId)) return taggedId;
-    }
-
-    if (/^\d+$/.test(value) && labs.some(l => String(l.id) === value)) {
-      return value;
-    }
-
-    const lower = value.toLowerCase();
-    const exact = labs.filter(l => String(l.name || '').trim().toLowerCase() === lower);
-    if (exact.length === 1) return String(exact[0].id);
-
-    const contains = labs.filter(l => String(l.name || '').trim().toLowerCase().includes(lower));
-    if (contains.length === 1) return String(contains[0].id);
-
-    return null;
-  };
 
   useEffect(() => { loadData(); }, []);
 
@@ -605,38 +576,6 @@ export default function LabRequests() {
         type: 'preview',
       }))
     : allLabSlots;
-
-  const handleAssign = async (item: LabOverviewItem) => {
-    if (!item.req_id) return;
-    const key = itemKey(item);
-    let labId = selectedLab[key];
-    if (!labId) {
-      const inferredId = resolveLabIdFromSearch(selectedLabSearch[key] || '');
-      if (inferredId) {
-        labId = inferredId;
-        setSelectedLab(prev => ({ ...prev, [key]: inferredId }));
-      }
-    }
-    if (!labId) {
-      setStatus({ type: 'error', msg: 'Type a lab name and choose a suggestion before assigning.' });
-      return;
-    }
-    setAssigningKey(itemKey(item));
-    setStatus(null);
-    const res = await fetch(`/api/lab-requirements/${item.req_id}/assign`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lab_id: parseInt(labId, 10) })
-    });
-    setAssigningKey(null);
-    const data = await res.json();
-    if (!res.ok) {
-      setStatus({ type: 'error', msg: data.error || 'Failed to assign lab.' });
-      return;
-    }
-    setStatus({ type: 'success', msg: `Lab assigned to ${item.class_name} — ${item.subject_name}.` });
-    loadData();
-  };
 
   const handleDelete = async (item: LabOverviewItem) => {
     if (!item.req_id) return;
@@ -1313,14 +1252,6 @@ export default function LabRequests() {
         ))}
       </datalist>
 
-      <datalist id="lab-assign-suggestions">
-        {labs.map(lab => (
-          <option key={`assign-lab-${lab.id}`} value={toAssignSuggestionValue(lab)}>
-            {`${lab.name} (${lab.systems_count ?? 0} systems)`}
-          </option>
-        ))}
-      </datalist>
-
       <datalist id="grid-subject-assign-suggestions">
         {manualAssignSuggestions.map(item => (
           <option key={`grid-assign-${item.req_id}`} value={item.label} />
@@ -1449,42 +1380,9 @@ export default function LabRequests() {
                 )}
 
                 {item.status === 'pending' && (
-                  <>
-                    <div className="flex items-center gap-1 px-2 py-1 rounded bg-amber-700/20 text-amber-300 text-xs font-mono">
-                      <Clock size={11} /> Pending
-                    </div>
-                    <input
-                      className="bg-[#0a0e17] border border-[#2a3a57] rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:border-cyan-500 min-w-[220px]"
-                      list="lab-assign-suggestions"
-                      placeholder="Search lab to assign..."
-                      value={selectedLabSearch[itemKey(item)] || ''}
-                      onChange={e => {
-                        const value = e.target.value;
-                        const key = itemKey(item);
-                        setSelectedLabSearch(prev => ({ ...prev, [key]: value }));
-                        const inferredId = resolveLabIdFromSearch(value);
-                        if (inferredId) {
-                          setSelectedLab(prev => ({ ...prev, [key]: inferredId }));
-                        } else {
-                          setSelectedLab(prev => ({ ...prev, [key]: '' }));
-                        }
-                      }}
-                    />
-                    <button
-                      onClick={() => handleAssign(item)}
-                      disabled={assigningKey === itemKey(item) || (!selectedLab[itemKey(item)] && !resolveLabIdFromSearch(selectedLabSearch[itemKey(item)] || ''))}
-                      className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white text-xs font-mono font-bold uppercase tracking-wider transition-colors"
-                    >
-                      {assigningKey === itemKey(item) ? 'Assigning…' : 'Assign'}
-                    </button>
-                    <button
-                      onClick={() => handleDelete(item)}
-                      disabled={deletingId === item.req_id}
-                      className="p-2 rounded text-slate-600 hover:text-red-400 transition-colors disabled:opacity-50"
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                  </>
+                  <div className="flex items-center gap-1 px-2 py-1 rounded bg-amber-700/20 text-amber-300 text-xs font-mono">
+                    <Clock size={11} /> Pending
+                  </div>
                 )}
 
                 {item.status === 'assigned' && (
