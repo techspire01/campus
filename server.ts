@@ -3362,7 +3362,7 @@ async function startServer() {
   app.get('/api/tamil/preview/:sessionId', async (req, res) => {
     try {
       const { sessionId } = req.params;
-      const rows = await pool.query(
+      const previewRows = await pool.query(
         `SELECT p.id, p.session_id, p.class_id, c.name AS class_name, p.subject_id, p.staff_id, p.day_order, p.period, p.hours_per_week
          FROM cg_tamil_preview_slots p
          JOIN cg_classes c ON c.id = p.class_id
@@ -3370,7 +3370,26 @@ async function startServer() {
          ORDER BY p.class_id, p.day_order, p.period`,
         [sessionId]
       );
-      res.json(rows.rows);
+
+      const classIds = [...new Set((previewRows.rows as any[]).map(row => Number(row.class_id)).filter(Boolean))];
+      let timetableRows: any[] = [];
+
+      if (classIds.length > 0) {
+        const timetableResult = await pool.query(
+          `SELECT ts.id, ts.class_id, c.name AS class_name, ts.subject_id, s.name AS subject_name, s.code AS subject_code,
+                  ts.staff_id, st.name AS staff_name, ts.day_order, ts.period, ts.type
+           FROM cg_timetable_slots ts
+           JOIN cg_classes c ON c.id = ts.class_id
+           LEFT JOIN cg_subjects s ON s.id = ts.subject_id
+           LEFT JOIN cg_staff st ON st.id = ts.staff_id
+           WHERE ts.class_id = ANY($1::int[])
+           ORDER BY ts.class_id, ts.day_order, ts.period`,
+          [classIds]
+        );
+        timetableRows = timetableResult.rows;
+      }
+
+      res.json({ previewSlots: previewRows.rows, timetableSlots: timetableRows });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

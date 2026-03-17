@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, CheckCircle, Edit, RotateCcw } from 'lucide-react';
+import { ArrowLeft, Calendar, CheckCircle, Edit, RotateCcw } from 'lucide-react';
 import { clsx } from 'clsx';
+import { Settings } from '../types';
 
 interface TamilSlot {
   id?: number;
@@ -14,6 +15,21 @@ interface TamilSlot {
   hours_per_week: number;
 }
 
+interface ExistingSlot {
+  id: number;
+  class_id: number;
+  class_name?: string;
+  subject_id: number | null;
+  subject_name?: string;
+  subject_code?: string;
+  staff_id: number | null;
+  staff_name?: string;
+  lab_name?: string;
+  day_order: number;
+  period: number;
+  type?: string | null;
+}
+
 interface DragState {
   sourceDay: number;
   sourcePeriod: number;
@@ -23,7 +39,9 @@ interface DragState {
 export default function TamilPreview() {
   const { sessionId } = useParams();
   const navigate = useNavigate();
-  const [slots, setSlots] = useState<TamilSlot[]>([]);
+  const [previewSlots, setPreviewSlots] = useState<TamilSlot[]>([]);
+  const [timetableSlots, setTimetableSlots] = useState<ExistingSlot[]>([]);
+  const [settings, setSettings] = useState<Settings | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
   const [status, setStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
@@ -37,12 +55,22 @@ export default function TamilPreview() {
     loadPreview();
   }, [sessionId]);
 
+  useEffect(() => {
+    fetch('/api/settings')
+      .then(res => res.json())
+      .then(setSettings)
+      .catch((err: any) => {
+        setStatus({ type: 'error', msg: `Failed to load settings: ${err.message}` });
+      });
+  }, []);
+
   const loadPreview = async () => {
     try {
       setIsLoading(true);
       const res = await fetch(`/api/tamil/preview/${sessionId}`);
       const data = await res.json();
-      setSlots(data);
+      setPreviewSlots(Array.isArray(data?.previewSlots) ? data.previewSlots : []);
+      setTimetableSlots(Array.isArray(data?.timetableSlots) ? data.timetableSlots : []);
     } catch (err: any) {
       setStatus({ type: 'error', msg: `Failed to load preview: ${err.message}` });
     } finally {
@@ -86,7 +114,7 @@ export default function TamilPreview() {
   };
 
   const handleDragStart = (e: DragEvent, day: number, period: number, classId: number) => {
-    const slot = slots.find(s => s.class_id === classId && s.day_order === day && s.period === period);
+    const slot = previewSlots.find(s => s.class_id === classId && s.day_order === day && s.period === period);
     if (!slot) return;
     
     setDragState({ sourceDay: day, sourcePeriod: period, classId });
@@ -102,22 +130,24 @@ export default function TamilPreview() {
     e.preventDefault();
     if (!dragState || dragState.classId !== classId) return;
 
-    const sourceSlot = slots.find(
+    const sourceSlot = previewSlots.find(
       s => s.class_id === dragState.classId && s.day_order === dragState.sourceDay && s.period === dragState.sourcePeriod
     );
     if (!sourceSlot) return;
 
-    const targetSlot = slots.find(s => s.class_id === classId && s.day_order === targetDay && s.period === targetPeriod);
-    if (!targetSlot && !(targetDay !== dragState.sourceDay || targetPeriod !== dragState.sourcePeriod)) return;
+    const targetPreviewSlot = previewSlots.find(s => s.class_id === classId && s.day_order === targetDay && s.period === targetPeriod);
+    const existingSlot = timetableSlots.find(s => s.class_id === classId && s.day_order === targetDay && s.period === targetPeriod);
+    if (existingSlot || targetPreviewSlot) return;
+    if (!(targetDay !== dragState.sourceDay || targetPeriod !== dragState.sourcePeriod)) return;
 
     // Move the slot
-    const updated = slots.filter(s => !(s.class_id === dragState.classId && s.day_order === dragState.sourceDay && s.period === dragState.sourcePeriod));
+    const updated = previewSlots.filter(s => !(s.class_id === dragState.classId && s.day_order === dragState.sourceDay && s.period === dragState.sourcePeriod));
     updated.push({
       ...sourceSlot,
       day_order: targetDay,
       period: targetPeriod,
     });
-    setSlots(updated);
+    setPreviewSlots(updated);
     setHasChanges(true);
     setDragState(null);
   };
@@ -145,15 +175,34 @@ export default function TamilPreview() {
     return <div className="text-cyan-400 font-mono p-8">Loading Tamil preview...</div>;
   }
 
-  const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const classGroups = new Map<number, TamilSlot[]>();
+  const days = [1, 2, 3, 4, 5, 6];
+  const classGroups = new Map<number, { preview: TamilSlot[]; existing: ExistingSlot[]; className?: string }>();
   
-  for (const slot of slots) {
+  for (const slot of previewSlots) {
     if (!classGroups.has(slot.class_id)) {
-      classGroups.set(slot.class_id, []);
+      classGroups.set(slot.class_id, { preview: [], existing: [], className: slot.class_name });
     }
-    classGroups.get(slot.class_id)!.push(slot);
+    const group = classGroups.get(slot.class_id)!;
+    group.preview.push(slot);
+    group.className = group.className || slot.class_name;
   }
+
+  for (const slot of timetableSlots) {
+    if (!classGroups.has(slot.class_id)) {
+      classGroups.set(slot.class_id, { preview: [], existing: [], className: slot.class_name });
+    }
+    const group = classGroups.get(slot.class_id)!;
+    group.existing.push(slot);
+    group.className = group.className || slot.class_name;
+  }
+
+  if (!settings) {
+    return <div className="text-cyan-400 font-mono p-8">Loading Tamil preview...</div>;
+  }
+
+  const periods = Array.from({ length: parseInt(settings.periods_per_day) }, (_, i) => i + 1);
+  const breakAfter = parseInt(settings.break_after_period);
+  const lunchAfter = parseInt(settings.lunch_after_period);
 
   return (
     <div className="space-y-8 p-8">
@@ -238,54 +287,128 @@ export default function TamilPreview() {
       )}
 
       <div className="space-y-8">
-        {Array.from(classGroups.entries()).map(([classId, classSlots]) => (
-          <section key={classId} className="bg-[#0f1623] border border-[#1e2d47] rounded-xl p-6">
-            <div className="text-sm font-mono text-slate-400 mb-4 flex justify-between">
-              <span>Class: {classSlots[0]?.class_name || `Class ${classId}`}</span>
-              <span>Assigned: {classSlots.length} slots</span>
+        {Array.from(classGroups.entries()).map(([classId, classGroup]) => (
+          <section key={classId} className="bg-[#0f1623] border border-[#1e2d47] rounded-xl overflow-hidden shadow-2xl">
+            <div className="bg-[#141c2e] px-6 py-4 border-b border-[#1e2d47] flex justify-between items-center gap-4">
+              <div className="flex items-center gap-3">
+                <Calendar className="text-cyan-400" size={20} />
+                <h2 className="font-mono font-bold text-white uppercase tracking-wider">
+                  {classGroup.className || `Class ${classId}`} Schedule
+                </h2>
+              </div>
+              <div className="text-sm font-mono text-slate-400">
+                Assigned: {classGroup.preview.length} Tamil slots
+              </div>
             </div>
-            
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+
+            <div className="p-6 overflow-x-auto">
+              <table className="w-full border-collapse">
                 <thead>
-                  <tr className="border-b border-[#1e2d47]">
-                    <th className="px-4 py-2 text-left text-[10px] font-mono text-slate-500 uppercase">Period</th>
-                    {dayNames.map((day, idx) => (
-                      <th key={idx} className="px-4 py-2 text-center text-[10px] font-mono text-slate-500 uppercase">
-                        {day}
-                      </th>
+                  <tr>
+                    <th className="p-3 text-left text-[10px] font-mono text-slate-500 uppercase border-b border-[#1e2d47]">Day Order</th>
+                    {periods.map(period => (
+                      <Fragment key={`period-header-${classId}-${period}`}>
+                        <th className="p-3 text-center text-[10px] font-mono text-slate-500 uppercase border-b border-[#1e2d47]">
+                          Period {period}
+                        </th>
+                        {period === breakAfter && (
+                          <th className="p-3 text-center text-[10px] font-mono text-orange-500 uppercase border-b border-[#1e2d47] bg-orange-500/5">
+                            Break
+                          </th>
+                        )}
+                        {period === lunchAfter && (
+                          <th className="p-3 text-center text-[10px] font-mono text-cyan-500 uppercase border-b border-[#1e2d47] bg-cyan-500/5">
+                            Lunch
+                          </th>
+                        )}
+                      </Fragment>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {[1, 2, 3, 4, 5, 6, 7, 8].map(period => (
-                    <tr key={period} className="border-b border-[#1e2d47]">
-                      <td className="px-4 py-2 text-xs font-mono text-slate-400 bg-[#141c2e]">{period}</td>
-                      {dayNames.map((_, dayIdx) => {
-                        const dayOrder = dayIdx + 1;
-                        const slot = classSlots.find(s => s.day_order === dayOrder && s.period === period);
+                  {days.map(day => (
+                    <tr key={`row-${classId}-${day}`} className="border-b border-[#1e2d47]/50 hover:bg-[#141c2e]/30 transition-colors">
+                      <td className="p-4 font-mono font-bold text-cyan-500">DAY {day}</td>
+                      {periods.map(period => {
+                        const previewSlot = classGroup.preview.find(s => s.day_order === day && s.period === period);
+                        const existingSlot = classGroup.existing.find(s => s.day_order === day && s.period === period);
+                        const isTamil = !!previewSlot;
+                        const isOccupied = !!previewSlot || !!existingSlot;
+                        const slotTitle = isTamil
+                          ? 'Tamil'
+                          : existingSlot?.type === 'placement'
+                            ? 'PLACEMENT'
+                            : existingSlot?.subject_name || '-';
+                        const slotSubtext = isTamil
+                          ? ''
+                          : existingSlot?.type === 'placement'
+                            ? 'TRAINING'
+                            : existingSlot?.subject_code || '';
+                        const slotMeta = isTamil
+                          ? ''
+                          : existingSlot?.lab_name || existingSlot?.staff_name || '';
+
                         return (
-                          <td
-                            key={`${dayOrder}-${period}`}
-                            className="px-2 py-2 text-center"
-                            draggable={isEditing && !!slot}
-                            onDragStart={(e) => slot && handleDragStart(e, dayOrder, period, classId)}
-                            onDragOver={isEditing && !slot ? (e) => handleDragOver(e as any) : undefined}
-                            onDrop={isEditing ? (e) => handleDrop(e, dayOrder, period, classId) : undefined}
-                            style={{
-                              cursor: isEditing && slot ? 'grab' : isEditing ? 'pointer' : 'default',
-                              backgroundColor: slot ? 'rgba(16, 185, 129, 0.15)' : 'transparent',
-                              border: slot ? '1px solid rgba(16, 185, 129, 0.3)' : 'none',
-                            }}
-                          >
-                            {slot ? (
-                              <div className="bg-emerald-500/30 border border-emerald-500/60 rounded p-1 text-emerald-300 text-xs font-mono">
-                                Tamil
-                              </div>
-                            ) : (
-                              <div className="text-slate-700 text-xs">-</div>
+                          <Fragment key={`cell-${classId}-${day}-${period}`}>
+                            <td
+                              className={clsx(
+                                'p-2 transition-colors',
+                                isEditing && !isOccupied ? 'hover:bg-cyan-500/10' : ''
+                              )}
+                              onDragOver={isEditing && !isOccupied ? (e) => handleDragOver(e as any) : undefined}
+                              onDrop={isEditing ? (e) => handleDrop(e, day, period, classId) : undefined}
+                            >
+                              {isOccupied ? (
+                                <div
+                                  draggable={isEditing && !!previewSlot}
+                                  onDragStart={(e) => previewSlot && handleDragStart(e, day, period, classId)}
+                                  className={clsx(
+                                    'min-h-[80px] p-2 rounded border transition-all flex flex-col justify-center items-center text-center gap-1',
+                                    isEditing && previewSlot ? 'cursor-grab active:cursor-grabbing' : 'cursor-default',
+                                    isTamil
+                                      ? 'bg-emerald-500/10 border-emerald-500/30 shadow-[inset_0_0_10px_rgba(16,185,129,0.05)]'
+                                      : 'bg-cyan-500/5 border-cyan-500/20'
+                                  )}
+                                >
+                                  <div className={clsx(
+                                    'font-bold text-xs',
+                                    isTamil || existingSlot?.type === 'placement' ? 'text-emerald-400' : 'text-white'
+                                  )}>
+                                    {slotTitle}
+                                  </div>
+                                  {slotSubtext && (
+                                    <div className="text-[10px] text-cyan-400 font-mono">{slotSubtext}</div>
+                                  )}
+                                  {slotMeta && (
+                                    <div className={clsx(
+                                      'text-[9px]',
+                                      existingSlot?.lab_name ? 'text-emerald-400 font-mono' : 'text-slate-500'
+                                    )}>
+                                      {slotMeta}
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                <div className="min-h-[80px] p-2 rounded border border-dashed border-[#1e2d47] bg-[#0a0e17] flex items-center justify-center">
+                                  <span className="text-[10px] font-mono text-slate-800 uppercase tracking-widest">-</span>
+                                </div>
+                              )}
+                            </td>
+                            {period === breakAfter && (
+                              <td className="p-2">
+                                <div className="min-h-[80px] p-2 rounded border border-orange-500/20 bg-orange-500/5 flex items-center justify-center">
+                                  <span className="text-[10px] font-mono text-orange-500 uppercase tracking-[0.3em] rotate-90 md:rotate-0">Break</span>
+                                </div>
+                              </td>
                             )}
-                          </td>
+                            {period === lunchAfter && (
+                              <td className="p-2">
+                                <div className="min-h-[80px] p-2 rounded border border-cyan-500/20 bg-cyan-500/5 flex items-center justify-center">
+                                  <span className="text-[10px] font-mono text-cyan-500 uppercase tracking-[0.3em] rotate-90 md:rotate-0">Lunch</span>
+                                </div>
+                              </td>
+                            )}
+                          </Fragment>
                         );
                       })}
                     </tr>
@@ -295,13 +418,13 @@ export default function TamilPreview() {
             </div>
             
             <div className="mt-4 text-[10px] font-mono text-slate-500">
-              Total hours/week: {classSlots.length} | Staff count: {new Set(classSlots.map(s => s.staff_id)).size}
+              Total hours/week: {classGroup.preview.length} | Staff count: {new Set(classGroup.preview.map(s => s.staff_id)).size}
             </div>
           </section>
         ))}
       </div>
 
-      {slots.length === 0 && (
+      {previewSlots.length === 0 && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-4 text-center">
           <p className="text-sm text-amber-300 font-mono">No Tamil slots scheduled for this session.</p>
         </div>
