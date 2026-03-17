@@ -402,28 +402,38 @@ export default function LabRequests() {
   };
 
   const handleRemoveGridSlot = async (slot: LabGridSlot) => {
-    const confirmed = window.confirm('Remove this assigned preview subject block from the grid?');
+    const isPreview = slot.type === 'preview';
+    const confirmed = window.confirm(`Remove this ${isPreview ? 'preview ' : ''}assigned subject block from the grid?`);
     if (!confirmed) return;
 
     const key = gridCellKey(slot.lab_id, slot.day_order, slot.period);
     setRemovingGridCellKey(key);
     setStatus(null);
     try {
-      const res = await fetch('/api/labs/preview/remove-manual', {
+      const endpoint = isPreview ? '/api/labs/preview/remove-manual' : '/api/timetable/labs/remove';
+      const body = isPreview ? { preview_slot_id: slot.id } : { slot_id: slot.id };
+
+      const res = await fetch(endpoint, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ preview_slot_id: slot.id }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (!res.ok) {
-        setStatus({ type: 'error', msg: data.error || 'Failed to remove assigned subject.' });
+        setStatus({ type: 'error', msg: data.error || `Failed to remove ${isPreview ? 'preview ' : ''}assigned subject.` });
         return;
       }
 
-      await loadPreview();
-      setHasPreviewChanges(true);
-      setStatus({ type: 'success', msg: `Removed ${data.removed_slots || 0} slot(s) from preview.` });
-      autoSavePreview();
+      if (isPreview) {
+        await loadPreview();
+        setHasPreviewChanges(true);
+      } else {
+        await loadAllLabSlots();
+        loadData();
+      }
+
+      setStatus({ type: 'success', msg: `Removed ${data.removed_slots || 1} slot(s) from ${isPreview ? 'preview' : 'timetable'}.` });
+      if (isPreview) autoSavePreview();
     } catch (error: any) {
       setStatus({ type: 'error', msg: error?.message || 'Network error while removing assigned subject.' });
     } finally {
@@ -598,20 +608,20 @@ export default function LabRequests() {
 
   const gridSource: LabGridSlot[] = preview.length > 0
     ? preview.map(p => ({
-        id: p.id,
-        class_id: p.class_id,
-        class_name: p.class_name,
-        subject_id: p.subject_id,
-        subject_name: p.subject_name,
-        subject_code: p.subject_code,
-        lab_id: p.lab_id,
-        lab_name: p.lab_name,
-        day_order: p.day_order,
-        period: p.period,
-        lab_requirement_id: p.lab_requirement_id,
-        preview_group: p.preview_group,
-        type: 'preview',
-      }))
+      id: p.id,
+      class_id: p.class_id,
+      class_name: p.class_name,
+      subject_id: p.subject_id,
+      subject_name: p.subject_name,
+      subject_code: p.subject_code,
+      lab_id: p.lab_id,
+      lab_name: p.lab_name,
+      day_order: p.day_order,
+      period: p.period,
+      lab_requirement_id: p.lab_requirement_id,
+      preview_group: p.preview_group,
+      type: 'preview',
+    }))
     : allLabSlots;
 
   const handleDelete = async (item: LabOverviewItem) => {
@@ -913,100 +923,100 @@ export default function LabRequests() {
               <div className="text-sm text-slate-400">No preview slots yet. Use Assign and continue manual lab assignment from the request list.</div>
             ) : (
               <div className="space-y-3">
-              <div className="text-[11px] font-mono text-slate-500">Tip: Drag a preview row and drop it on another row to move its session block quickly.</div>
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left text-[10px] font-mono uppercase tracking-wider text-slate-500 border-b border-[#1e2d47]">
-                    <th className="py-2 pr-3">Class</th>
-                    <th className="py-2 pr-3">Subject</th>
-                    <th className="py-2 pr-3">Lab</th>
-                    <th className="py-2 pr-3">Day</th>
-                    <th className="py-2 pr-3">Period</th>
-                    <th className="py-2 pr-3">Move</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {preview.map(row => (
-                    <tr
-                      key={row.id}
-                      draggable
-                      onDragStart={e => {
-                        setDraggingRowId(row.id);
-                        e.dataTransfer.setData('text/plain', String(row.id));
-                        e.dataTransfer.effectAllowed = 'move';
-                      }}
-                      onDragEnd={() => setDraggingRowId(null)}
-                      onDragOver={e => e.preventDefault()}
-                      onDrop={async e => {
-                        e.preventDefault();
-                        const droppedId = Number(e.dataTransfer.getData('text/plain'));
-                        const sourceId = Number.isFinite(droppedId) && droppedId > 0 ? droppedId : undefined;
-                        await handleDropOnRow(row, sourceId);
-                      }}
-                      className={`border-b border-[#1e2d47]/40 ${draggingRowId === row.id ? 'opacity-40' : ''}`}
-                    >
-                      <td className="py-2 pr-3 text-slate-200">{row.class_name}</td>
-                      <td className="py-2 pr-3 text-slate-300">{row.subject_name} <span className="text-slate-500">({row.subject_code})</span></td>
-                      <td className="py-2 pr-3 text-cyan-300">{row.lab_name}</td>
-                      <td className="py-2 pr-3 text-slate-300">{row.day_order}</td>
-                      <td className="py-2 pr-3 text-slate-300">{row.period}</td>
-                      <td className="py-2 pr-3">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <select
-                            className="bg-[#0a0e17] border border-[#2a3a57] rounded px-2 py-1 text-xs"
-                            value={moveDrafts[row.id]?.to_day ?? row.day_order}
-                            onChange={e => setMoveDrafts(prev => ({
-                              ...prev,
-                              [row.id]: {
-                                to_day: parseInt(e.target.value, 10),
-                                to_period: prev[row.id]?.to_period ?? row.period,
-                                to_lab_id: prev[row.id]?.to_lab_id ?? row.lab_id,
-                              }
-                            }))}
-                          >
-                            {[1, 2, 3, 4, 5, 6].map(d => <option key={d} value={d}>Day {d}</option>)}
-                          </select>
-                          <select
-                            className="bg-[#0a0e17] border border-[#2a3a57] rounded px-2 py-1 text-xs"
-                            value={moveDrafts[row.id]?.to_period ?? row.period}
-                            onChange={e => setMoveDrafts(prev => ({
-                              ...prev,
-                              [row.id]: {
-                                to_day: prev[row.id]?.to_day ?? row.day_order,
-                                to_period: parseInt(e.target.value, 10),
-                                to_lab_id: prev[row.id]?.to_lab_id ?? row.lab_id,
-                              }
-                            }))}
-                          >
-                            {[1, 2, 3, 4, 5, 6].map(p => <option key={p} value={p}>P{p}</option>)}
-                          </select>
-                          <select
-                            className="bg-[#0a0e17] border border-[#2a3a57] rounded px-2 py-1 text-xs"
-                            value={moveDrafts[row.id]?.to_lab_id ?? row.lab_id}
-                            onChange={e => setMoveDrafts(prev => ({
-                              ...prev,
-                              [row.id]: {
-                                to_day: prev[row.id]?.to_day ?? row.day_order,
-                                to_period: prev[row.id]?.to_period ?? row.period,
-                                to_lab_id: parseInt(e.target.value, 10),
-                              }
-                            }))}
-                          >
-                            {labs.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
-                          </select>
-                          <button
-                            onClick={() => handleMovePreview(row)}
-                            disabled={movingId === row.id}
-                            className="px-2 py-1 rounded bg-[#1a2c49] hover:bg-[#22365a] text-xs font-mono text-cyan-300"
-                          >
-                            {movingId === row.id ? 'Moving…' : 'Move'}
-                          </button>
-                        </div>
-                      </td>
+                <div className="text-[11px] font-mono text-slate-500">Tip: Drag a preview row and drop it on another row to move its session block quickly.</div>
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-[10px] font-mono uppercase tracking-wider text-slate-500 border-b border-[#1e2d47]">
+                      <th className="py-2 pr-3">Class</th>
+                      <th className="py-2 pr-3">Subject</th>
+                      <th className="py-2 pr-3">Lab</th>
+                      <th className="py-2 pr-3">Day</th>
+                      <th className="py-2 pr-3">Period</th>
+                      <th className="py-2 pr-3">Move</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {preview.map(row => (
+                      <tr
+                        key={row.id}
+                        draggable
+                        onDragStart={e => {
+                          setDraggingRowId(row.id);
+                          e.dataTransfer.setData('text/plain', String(row.id));
+                          e.dataTransfer.effectAllowed = 'move';
+                        }}
+                        onDragEnd={() => setDraggingRowId(null)}
+                        onDragOver={e => e.preventDefault()}
+                        onDrop={async e => {
+                          e.preventDefault();
+                          const droppedId = Number(e.dataTransfer.getData('text/plain'));
+                          const sourceId = Number.isFinite(droppedId) && droppedId > 0 ? droppedId : undefined;
+                          await handleDropOnRow(row, sourceId);
+                        }}
+                        className={`border-b border-[#1e2d47]/40 ${draggingRowId === row.id ? 'opacity-40' : ''}`}
+                      >
+                        <td className="py-2 pr-3 text-slate-200">{row.class_name}</td>
+                        <td className="py-2 pr-3 text-slate-300">{row.subject_name} <span className="text-slate-500">({row.subject_code})</span></td>
+                        <td className="py-2 pr-3 text-cyan-300">{row.lab_name}</td>
+                        <td className="py-2 pr-3 text-slate-300">{row.day_order}</td>
+                        <td className="py-2 pr-3 text-slate-300">{row.period}</td>
+                        <td className="py-2 pr-3">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <select
+                              className="bg-[#0a0e17] border border-[#2a3a57] rounded px-2 py-1 text-xs"
+                              value={moveDrafts[row.id]?.to_day ?? row.day_order}
+                              onChange={e => setMoveDrafts(prev => ({
+                                ...prev,
+                                [row.id]: {
+                                  to_day: parseInt(e.target.value, 10),
+                                  to_period: prev[row.id]?.to_period ?? row.period,
+                                  to_lab_id: prev[row.id]?.to_lab_id ?? row.lab_id,
+                                }
+                              }))}
+                            >
+                              {[1, 2, 3, 4, 5, 6].map(d => <option key={d} value={d}>Day {d}</option>)}
+                            </select>
+                            <select
+                              className="bg-[#0a0e17] border border-[#2a3a57] rounded px-2 py-1 text-xs"
+                              value={moveDrafts[row.id]?.to_period ?? row.period}
+                              onChange={e => setMoveDrafts(prev => ({
+                                ...prev,
+                                [row.id]: {
+                                  to_day: prev[row.id]?.to_day ?? row.day_order,
+                                  to_period: parseInt(e.target.value, 10),
+                                  to_lab_id: prev[row.id]?.to_lab_id ?? row.lab_id,
+                                }
+                              }))}
+                            >
+                              {[1, 2, 3, 4, 5, 6].map(p => <option key={p} value={p}>P{p}</option>)}
+                            </select>
+                            <select
+                              className="bg-[#0a0e17] border border-[#2a3a57] rounded px-2 py-1 text-xs"
+                              value={moveDrafts[row.id]?.to_lab_id ?? row.lab_id}
+                              onChange={e => setMoveDrafts(prev => ({
+                                ...prev,
+                                [row.id]: {
+                                  to_day: prev[row.id]?.to_day ?? row.day_order,
+                                  to_period: prev[row.id]?.to_period ?? row.period,
+                                  to_lab_id: parseInt(e.target.value, 10),
+                                }
+                              }))}
+                            >
+                              {labs.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                            </select>
+                            <button
+                              onClick={() => handleMovePreview(row)}
+                              disabled={movingId === row.id}
+                              className="px-2 py-1 rounded bg-[#1a2c49] hover:bg-[#22365a] text-xs font-mono text-cyan-300"
+                            >
+                              {movingId === row.id ? 'Moving…' : 'Move'}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </div>
@@ -1114,13 +1124,22 @@ export default function LabRequests() {
                                       <>
                                         <div className="font-semibold truncate">{slot.class_name}</div>
                                         <div className="text-[10px] text-cyan-300 truncate">{slot.subject_code}</div>
-                                          {isEditMode && (
+                                        {isEditMode && (
                                           <button
-                                            onClick={() => handleRemoveGridSlot(slot)}
+                                            type="button"
+                                            onMouseDown={e => {
+                                              e.preventDefault();
+                                              e.stopPropagation();
+                                            }}
+                                            onClick={e => {
+                                              e.preventDefault();
+                                              e.stopPropagation();
+                                              void handleRemoveGridSlot(slot);
+                                            }}
                                             disabled={isRemovingCell}
                                             className="mt-1 px-1.5 py-0.5 rounded bg-red-600/80 hover:bg-red-500 disabled:opacity-50 text-[9px] font-mono text-white"
                                           >
-                                            {isRemovingCell ? 'Removing…' : 'Remove'}
+                                            {isRemovingCell ? 'Removing...' : 'Remove'}
                                           </button>
                                         )}
                                       </>
@@ -1251,13 +1270,12 @@ export default function LabRequests() {
                     return (
                       <div
                         key={stage}
-                        className={`px-2 py-1.5 rounded border ${
-                          completed
+                        className={`px-2 py-1.5 rounded border ${completed
                             ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
                             : active
                               ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-200 animate-pulse'
                               : 'border-[#1e2d47] bg-[#0a0e17] text-slate-500'
-                        }`}
+                          }`}
                       >
                         {stage}
                       </div>
@@ -1358,19 +1376,17 @@ export default function LabRequests() {
           <button
             key={tab}
             onClick={() => setFilter(tab)}
-            className={`relative px-4 py-2.5 text-xs font-mono uppercase tracking-widest rounded-t transition-colors ${
-              filter === tab
+            className={`relative px-4 py-2.5 text-xs font-mono uppercase tracking-widest rounded-t transition-colors ${filter === tab
                 ? 'text-cyan-400 border border-b-0 border-[#1e2d47] bg-[#0f1623] -mb-px'
                 : 'text-slate-500 hover:text-slate-200'
-            }`}
+              }`}
           >
             {tabLabel[tab]}
             {tab !== 'all' && counts[tab] > 0 && (
-              <span className={`ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
-                tab === 'not_submitted' ? 'bg-slate-600 text-slate-200'
-                : tab === 'pending'     ? 'bg-amber-500/30 text-amber-300'
-                :                        'bg-emerald-500/30 text-emerald-300'
-              }`}>
+              <span className={`ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold ${tab === 'not_submitted' ? 'bg-slate-600 text-slate-200'
+                  : tab === 'pending' ? 'bg-amber-500/30 text-amber-300'
+                    : 'bg-emerald-500/30 text-emerald-300'
+                }`}>
                 {counts[tab]}
               </span>
             )}
@@ -1424,9 +1440,9 @@ export default function LabRequests() {
           <FlaskConical size={44} className="mb-4 opacity-30" />
           <p className="font-mono text-sm uppercase tracking-wider">
             {filter === 'not_submitted' ? 'All lab subjects have been submitted'
-              : filter === 'pending'    ? 'No pending requests'
-              : filter === 'assigned'   ? 'No labs assigned yet'
-              :                          'No lab subjects found'}
+              : filter === 'pending' ? 'No pending requests'
+                : filter === 'assigned' ? 'No labs assigned yet'
+                  : 'No lab subjects found'}
           </p>
         </div>
       )}
@@ -1435,20 +1451,18 @@ export default function LabRequests() {
         {displayed.map(item => (
           <div
             key={itemKey(item)}
-            className={`rounded-xl border p-4 ${
-              item.status === 'assigned'      ? 'border-emerald-500/20 bg-emerald-500/5'
-              : item.status === 'pending'     ? 'border-amber-500/20  bg-amber-500/5'
-              :                                 'border-[#1e2d47]      bg-[#0f1623]'
-            }`}
+            className={`rounded-xl border p-4 ${item.status === 'assigned' ? 'border-emerald-500/20 bg-emerald-500/5'
+                : item.status === 'pending' ? 'border-amber-500/20  bg-amber-500/5'
+                  : 'border-[#1e2d47]      bg-[#0f1623]'
+              }`}
           >
             <div className="flex flex-col lg:flex-row lg:items-center gap-4">
               {/* Icon + info */}
               <div className="flex-1 flex items-start gap-3 min-w-0">
-                <div className={`mt-0.5 p-2 rounded-lg shrink-0 ${
-                  item.status === 'assigned'  ? 'bg-emerald-500/10 text-emerald-400'
-                  : item.status === 'pending' ? 'bg-amber-500/10   text-amber-400'
-                  :                             'bg-slate-500/10   text-slate-400'
-                }`}>
+                <div className={`mt-0.5 p-2 rounded-lg shrink-0 ${item.status === 'assigned' ? 'bg-emerald-500/10 text-emerald-400'
+                    : item.status === 'pending' ? 'bg-amber-500/10   text-amber-400'
+                      : 'bg-slate-500/10   text-slate-400'
+                  }`}>
                   <FlaskRound size={18} />
                 </div>
                 <div className="min-w-0">
@@ -1516,3 +1530,4 @@ export default function LabRequests() {
     </div>
   );
 }
+

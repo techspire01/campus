@@ -1245,13 +1245,33 @@ async function startServer() {
       const classId = Number(req.params.classId);
       const classSubjectId = Number(req.params.classSubjectId);
       const existing = await pool.query(
-        'SELECT id FROM cg_class_subjects WHERE id = $1 AND class_id = $2',
+        'SELECT id, subject_id FROM cg_class_subjects WHERE id = $1 AND class_id = $2',
         [classSubjectId, classId]
       );
       if (existing.rowCount === 0) return res.status(404).json({ error: 'Class subject not found' });
 
-      await pool.query('DELETE FROM cg_class_subjects WHERE id = $1', [classSubjectId]);
-      res.json({ success: true });
+      const subjectId = Number(existing.rows[0].subject_id);
+
+      const summary = await inTransaction(async client => {
+        const deletedSlots = await client.query(
+          'DELETE FROM cg_timetable_slots WHERE class_id = $1 AND subject_id = $2 RETURNING id',
+          [classId, subjectId]
+        );
+
+        const deletedRequirements = await client.query(
+          'DELETE FROM cg_lab_requirements WHERE class_id = $1 AND subject_id = $2 RETURNING id',
+          [classId, subjectId]
+        );
+
+        await client.query('DELETE FROM cg_class_subjects WHERE id = $1', [classSubjectId]);
+
+        return {
+          removed_slots: deletedSlots.rowCount ?? 0,
+          removed_lab_requirements: deletedRequirements.rowCount ?? 0,
+        };
+      });
+
+      res.json({ success: true, ...summary });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
@@ -2422,6 +2442,58 @@ async function startServer() {
       });
 
       res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.delete('/api/timetable/labs/remove', async (req, res) => {
+    try {
+      const { slot_id } = req.body;
+      if (!slot_id) {
+        return res.status(400).json({ error: 'slot_id is required.' });
+      }
+
+      const result = await inTransaction(async client => {
+        const sourceRow = await client.query(
+          `SELECT class_id, subject_id, lab_id
+           FROM cg_timetable_slots
+           WHERE id = $1 AND lab_id IS NOT NULL`,
+          [Number(slot_id)]
+        );
+
+        if ((sourceRow.rowCount ?? 0) === 0) {
+          throw new Error('Timetable lab slot not found.');
+        }
+
+        const { class_id, subject_id, lab_id } = sourceRow.rows[0];
+
+        // Delete the slot
+        await client.query('DELETE FROM cg_timetable_slots WHERE id = $1', [Number(slot_id)]);
+
+        // Check if any other slots for this requirement exist
+        const remaining = await client.query(
+          `SELECT COUNT(*)::int AS count
+           FROM cg_timetable_slots
+           WHERE class_id = $1 AND subject_id = $2 AND lab_id IS NOT NULL`,
+          [class_id, subject_id]
+        );
+
+        const remainingCount = Number(remaining.rows[0].count);
+        if (remainingCount === 0) {
+          // Reset requirement status
+          await client.query(
+            `UPDATE cg_lab_requirements
+             SET status = 'pending', lab_id = NULL
+             WHERE class_id = $1 AND subject_id = $2`,
+            [class_id, subject_id]
+          );
+        }
+
+        return { class_id, subject_id, remaining_slots: remainingCount };
+      });
+
+      res.json({ success: true, ...result });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
