@@ -119,7 +119,7 @@ export default function TamilPreview() {
 
       await loadPreview();
       setStatus({ type: 'success', msg: 'Timetable regenerated successfully!' });
-      setHasChanges(false);
+      setHasChanges(true);
     } catch (err: any) {
       setStatus({ type: 'error', msg: err.message });
     } finally {
