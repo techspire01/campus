@@ -665,21 +665,28 @@ export default function LabRequests() {
 
   const requirementProgress = useMemo(() => {
     const map = new Map<number, { assigned: number; required: number }>();
+    const reqIdByClassSubject = new Map<string, number>();
+
     for (const item of items) {
       if (!item.req_id) continue;
       const reqId = Number(item.req_id);
       const required = Number(item.duration || item.hours_per_week || 1);
       map.set(reqId, { assigned: 0, required: Math.max(1, required) });
+      reqIdByClassSubject.set(itemKey(item), reqId);
     }
-    for (const slot of preview) {
-      const reqId = Number(slot.lab_requirement_id);
+
+    for (const slot of gridSource) {
+      const reqId = slot.lab_requirement_id
+        ? Number(slot.lab_requirement_id)
+        : reqIdByClassSubject.get(`${slot.class_id}-${slot.subject_id}`);
       const current = map.get(reqId);
       if (!current) continue;
       current.assigned += 1;
       map.set(reqId, current);
     }
+
     return map;
-  }, [items, preview]);
+  }, [gridSource, items]);
 
   const labCapacityMap = useMemo(() => {
     const map = new Map<number, { used: number; capacity: number }>();
