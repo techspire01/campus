@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Department, Class, Staff } from '../types';
+import { Department, Class, Staff, Subject } from '../types';
 import { Plus, GraduationCap, ChevronRight, BarChart3, Lock } from 'lucide-react';
 import { clsx } from 'clsx';
 
@@ -12,8 +12,11 @@ export default function DepartmentDashboard() {
   const navigate = useNavigate();
   const deptId = Number(id);
   const [dept, setDept] = useState<Department | null>(null);
+  const [departments, setDepartments] = useState<Department[]>([]);
   const [classes, setClasses] = useState<Class[]>([]);
+  const [allClasses, setAllClasses] = useState<Class[]>([]);
   const [staff, setStaff] = useState<Staff[]>([]);
+  const [subjects, setSubjects] = useState<Subject[]>([]);
   const [newClass, setNewClass] = useState({
     name: '',
     year: 1,
@@ -22,6 +25,13 @@ export default function DepartmentDashboard() {
   });
   const [strengthDrafts, setStrengthDrafts] = useState<Record<number, string>>({});
   const [status, setStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+  const [activeTamilView, setActiveTamilView] = useState<'staff' | 'assign'>('staff');
+  const [selectedTamilClassIds, setSelectedTamilClassIds] = useState<number[]>([]);
+  const [tamilClassFilterYear, setTamilClassFilterYear] = useState<string>('all');
+  const [tamilClassFilterDeptId, setTamilClassFilterDeptId] = useState<string>('all');
+  const [defaultTamilHours, setDefaultTamilHours] = useState<string>('1');
+  const [hoursByTamilClass, setHoursByTamilClass] = useState<Record<number, string>>({});
+  const [staffByTamilClass, setStaffByTamilClass] = useState<Record<number, string>>({});
 
   const departmentStaff = useMemo(() => {
     const scoped = staff.filter(member => member.dept_id === deptId);
@@ -39,15 +49,30 @@ export default function DepartmentDashboard() {
 
   useEffect(() => {
     fetch('/api/departments').then(res => res.json()).then(data => {
+      setDepartments(data as Department[]);
       const department = data.find((item: Department) => item.id === deptId);
       setDept(department || null);
     });
     fetch('/api/classes').then(res => res.json()).then(data => {
-      setClasses(data.filter((item: Class) => item.dept_id === deptId));
+      setAllClasses(data as Class[]);
+      setClasses((data as Class[]).filter((item: Class) => item.dept_id === deptId));
     });
     fetch('/api/staff').then(res => res.json()).then(data => {
       setStaff(data as Staff[]);
     });
+    fetch('/api/subjects').then(res => res.json()).then(data => {
+      setSubjects(data as Subject[]);
+    });
+  }, [deptId]);
+
+  useEffect(() => {
+    setSelectedTamilClassIds([]);
+    setHoursByTamilClass({});
+    setStaffByTamilClass({});
+    setTamilClassFilterYear('all');
+    setTamilClassFilterDeptId('all');
+    setDefaultTamilHours('1');
+    setActiveTamilView('staff');
   }, [deptId]);
 
   const handleAddClass = async () => {
@@ -97,6 +122,109 @@ export default function DepartmentDashboard() {
   if (!dept) return <div className="text-cyan-400 font-mono">Loading department data...</div>;
 
   const isClassCreationDisabled = RESTRICTED_DEPARTMENTS.includes(dept.name.toLowerCase());
+  const isTamilDepartment = dept.name.trim().toLowerCase() === 'tamil';
+  const isTamilAssignView = isTamilDepartment && activeTamilView === 'assign';
+
+  const tamilSubject = subjects.find(subject => {
+    if (subject.dept_id !== deptId) return false;
+    const subjectName = subject.name.trim().toLowerCase();
+    return subjectName === 'tamil' || subjectName.includes('tamil');
+  });
+
+  const filteredTamilClasses = allClasses.filter(item => {
+    const departmentMatch = tamilClassFilterDeptId === 'all' || item.dept_id === Number(tamilClassFilterDeptId);
+    const yearMatch = tamilClassFilterYear === 'all' || item.year === Number(tamilClassFilterYear);
+    return departmentMatch && yearMatch;
+  });
+
+  const selectedTamilClasses = allClasses.filter(item => selectedTamilClassIds.includes(item.id));
+
+  const getPendingTamilHoursForStaff = (staffId: number) => {
+    return selectedTamilClassIds.reduce((total, classId) => {
+      const assignedStaffId = Number(staffByTamilClass[classId] || 0);
+      if (assignedStaffId !== staffId) return total;
+      const parsedHours = parseInt(hoursByTamilClass[classId] ?? '0', 10);
+      if (Number.isNaN(parsedHours) || parsedHours <= 0) return total;
+      return total + parsedHours;
+    }, 0);
+  };
+
+  const getTamilStaffWorkload = (staffId: string) => {
+    if (!staffId) return null;
+    const selected = departmentStaff.find(member => member.id === Number(staffId));
+    if (!selected) return null;
+    const current = selected.current_workload || 0;
+    const pending = getPendingTamilHoursForStaff(selected.id);
+    return `${current + pending}h / ${selected.max_workload}h`;
+  };
+
+  const handleTamilClassToggle = (classId: number) => {
+    setSelectedTamilClassIds(current => {
+      if (current.includes(classId)) {
+        setHoursByTamilClass(hours => {
+          const next = { ...hours };
+          delete next[classId];
+          return next;
+        });
+        setStaffByTamilClass(staffMap => {
+          const next = { ...staffMap };
+          delete next[classId];
+          return next;
+        });
+        return current.filter(id => id !== classId);
+      }
+
+      setHoursByTamilClass(hours => ({ ...hours, [classId]: hours[classId] ?? defaultTamilHours }));
+      return [...current, classId];
+    });
+  };
+
+  const handleAssignTamilToSelectedClasses = async () => {
+    setStatus(null);
+
+    if (!tamilSubject) {
+      setStatus({ type: 'error', msg: 'Tamil subject is not available for this department.' });
+      return;
+    }
+
+    if (selectedTamilClassIds.length === 0) {
+      setStatus({ type: 'error', msg: 'Select at least one class to add Tamil.' });
+      return;
+    }
+
+    const invalidClass = selectedTamilClassIds.find(classId => {
+      const parsedHours = parseInt(hoursByTamilClass[classId] ?? '0', 10);
+      return Number.isNaN(parsedHours) || parsedHours <= 0;
+    });
+
+    if (invalidClass) {
+      setStatus({ type: 'error', msg: 'Hours/week must be greater than 0 for every selected class.' });
+      return;
+    }
+
+    const requests = selectedTamilClassIds.map(classId =>
+      fetch(`/api/classes/${classId}/subjects`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subject_id: tamilSubject.id,
+          staff_id: staffByTamilClass[classId] ? Number(staffByTamilClass[classId]) : null,
+          hours_per_week: parseInt(hoursByTamilClass[classId], 10),
+          is_lab_required: false,
+        })
+      })
+    );
+
+    const results = await Promise.all(requests);
+    const hasFailure = results.some(res => !res.ok);
+
+    if (hasFailure) {
+      setStatus({ type: 'error', msg: 'Failed to add Tamil to one or more selected classes.' });
+      return;
+    }
+
+    setStatus({ type: 'success', msg: 'Tamil added to selected classes with the configured hours/week.' });
+  };
 
   return (
     <div className="space-y-12">
@@ -118,17 +246,210 @@ export default function DepartmentDashboard() {
         </div>
       </header>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        <div className="lg:col-span-2 space-y-6">
+      {isTamilDepartment && (
+        <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl p-4">
+          <div className="text-[10px] font-mono text-cyan-500 uppercase tracking-[0.2em] mb-3">Tamil Department Options</div>
+          <div className="flex gap-2 flex-wrap">
+            <button
+              onClick={() => setActiveTamilView('staff')}
+              className={clsx(
+                'px-4 py-2 rounded text-xs font-mono uppercase tracking-wider border transition-colors',
+                activeTamilView === 'staff'
+                  ? 'bg-cyan-600 border-cyan-500 text-white'
+                  : 'bg-[#141c2e] border-[#1e2d47] text-slate-300 hover:border-cyan-500/40'
+              )}
+            >
+              Manage Staff & Workload
+            </button>
+            <button
+              onClick={() => setActiveTamilView('assign')}
+              className={clsx(
+                'px-4 py-2 rounded text-xs font-mono uppercase tracking-wider border transition-colors',
+                activeTamilView === 'assign'
+                  ? 'bg-cyan-600 border-cyan-500 text-white'
+                  : 'bg-[#141c2e] border-[#1e2d47] text-slate-300 hover:border-cyan-500/40'
+              )}
+            >
+              Select Classes & Add Tamil
+            </button>
+          </div>
+        </section>
+      )}
+
+      <div className={clsx('grid grid-cols-1 gap-8', !isTamilAssignView && 'lg:grid-cols-3')}>
+        <div className={clsx('space-y-6', !isTamilAssignView && 'lg:col-span-2')}>
           <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl overflow-hidden">
             <div className="bg-[#141c2e] px-6 py-4 border-b border-[#1e2d47] flex justify-between items-center">
               <div className="flex items-center gap-3">
                 <GraduationCap className="text-cyan-400" size={20} />
-                <h2 className="font-mono font-bold text-white uppercase tracking-wider">Academic Classes</h2>
+                <h2 className="font-mono font-bold text-white uppercase tracking-wider">
+                  {isTamilAssignView ? 'Tamil Class Allocation' : 'Academic Classes'}
+                </h2>
               </div>
             </div>
             <div className="p-6">
-              {isClassCreationDisabled ? (
+              {isTamilAssignView ? (
+                <div className="space-y-6">
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                    <div>
+                      <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 mb-1">Filter by Department</div>
+                      <select
+                        className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                        value={tamilClassFilterDeptId}
+                        onChange={e => setTamilClassFilterDeptId(e.target.value)}
+                      >
+                        <option value="all">All Departments</option>
+                        {departments.map(item => (
+                          <option key={item.id} value={item.id}>{item.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 mb-1">Filter by Year</div>
+                      <select
+                        className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                        value={tamilClassFilterYear}
+                        onChange={e => setTamilClassFilterYear(e.target.value)}
+                      >
+                        <option value="all">All Years</option>
+                        <option value="1">Year 1</option>
+                        <option value="2">Year 2</option>
+                        <option value="3">Year 3</option>
+                      </select>
+                    </div>
+                    <div>
+                      <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 mb-1">Default Hours / Week</div>
+                      <input
+                        type="number"
+                        min={1}
+                        className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                        value={defaultTamilHours}
+                        onChange={e => setDefaultTamilHours(e.target.value)}
+                      />
+                    </div>
+                    <div className="flex items-end">
+                      <button
+                        onClick={() => {
+                          setSelectedTamilClassIds(current => {
+                            const idSet = new Set(current);
+                            filteredTamilClasses.forEach(item => idSet.add(item.id));
+                            return Array.from(idSet);
+                          });
+                          setHoursByTamilClass(current => {
+                            const next = { ...current };
+                            filteredTamilClasses.forEach(item => {
+                              if (!next[item.id]) next[item.id] = defaultTamilHours;
+                            });
+                            return next;
+                          });
+                          setStaffByTamilClass(current => {
+                            const next = { ...current };
+                            filteredTamilClasses.forEach(item => {
+                              if (next[item.id] === undefined) next[item.id] = '';
+                            });
+                            return next;
+                          });
+                        }}
+                        className="w-full px-4 py-2 rounded bg-[#141c2e] border border-[#1e2d47] text-xs font-mono uppercase tracking-wider text-slate-300 hover:border-cyan-500/40"
+                      >
+                        Add Filtered Classes
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="max-h-56 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {filteredTamilClasses.map(item => {
+                      const checked = selectedTamilClassIds.includes(item.id);
+                      return (
+                        <label
+                          key={item.id}
+                          className={clsx(
+                            'rounded-lg border p-3 cursor-pointer',
+                            checked
+                              ? 'border-cyan-500/40 bg-cyan-500/10'
+                              : 'border-[#1e2d47] bg-[#141c2e]'
+                          )}
+                        >
+                          <div className="flex items-start gap-2">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => handleTamilClassToggle(item.id)}
+                              className="mt-1"
+                            />
+                            <div>
+                              <div className="font-semibold text-white text-sm">{item.name}</div>
+                              <div className="text-[10px] font-mono text-slate-500">{item.dept_name} • Year {item.year}</div>
+                            </div>
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+
+                  <div className="rounded-lg border border-[#1e2d47] overflow-hidden">
+                    <div className="grid grid-cols-3 bg-[#141c2e] border-b border-[#1e2d47] text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                      <div className="px-4 py-3">Class Name</div>
+                      <div className="px-4 py-3">Tamil Staff</div>
+                      <div className="px-4 py-3">Hours / Week</div>
+                    </div>
+                    <div className="divide-y divide-[#1e2d47]">
+                      {selectedTamilClasses.length === 0 ? (
+                        <div className="px-4 py-4 text-sm text-slate-500">No classes selected.</div>
+                      ) : (
+                        selectedTamilClasses.map(item => (
+                          <div key={item.id} className="grid grid-cols-3 items-center bg-[#0f1623]">
+                            <div className="px-4 py-3 text-sm text-white">{item.name}</div>
+                            <div className="px-4 py-2">
+                              <div className="flex items-center gap-2">
+                                <select
+                                  className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                                  value={staffByTamilClass[item.id] ?? ''}
+                                  onChange={e => setStaffByTamilClass(current => ({ ...current, [item.id]: e.target.value }))}
+                                >
+                                  <option value="">Not assigned</option>
+                                  {departmentStaff.map(member => (
+                                    <option key={member.id} value={member.id}>{member.name}</option>
+                                  ))}
+                                </select>
+                                {staffByTamilClass[item.id] && (
+                                  <div className="whitespace-nowrap rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-mono text-emerald-300">
+                                    {getTamilStaffWorkload(staffByTamilClass[item.id])}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                            <div className="px-4 py-2">
+                              <input
+                                type="number"
+                                min={1}
+                                className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                                value={hoursByTamilClass[item.id] ?? defaultTamilHours}
+                                onChange={e => setHoursByTamilClass(current => ({ ...current, [item.id]: e.target.value }))}
+                              />
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  {!tamilSubject && (
+                    <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-xs font-mono uppercase tracking-wider text-red-300">
+                      Tamil subject not found for this department. Create a subject named Tamil first.
+                    </div>
+                  )}
+
+                  <div className="flex justify-end">
+                    <button
+                      onClick={handleAssignTamilToSelectedClasses}
+                      className="px-4 py-2 rounded bg-cyan-600 hover:bg-cyan-500 text-xs font-mono font-bold text-white uppercase tracking-wider"
+                    >
+                      Add Tamil To Selected Classes
+                    </button>
+                  </div>
+                </div>
+              ) : isClassCreationDisabled ? (
                 <div className="mb-6 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-4 flex items-center gap-3">
                   <Lock className="text-amber-500" size={20} />
                   <div>
@@ -185,6 +506,7 @@ export default function DepartmentDashboard() {
                 </div>
               )}
 
+              {!isTamilAssignView && (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {classes.map(item => (
                   <div key={item.id} className="p-4 bg-[#141c2e] border border-[#1e2d47] rounded-lg transition-all hover:border-cyan-500/50">
@@ -257,10 +579,12 @@ export default function DepartmentDashboard() {
                   </div>
                 ))}
               </div>
+              )}
             </div>
           </section>
         </div>
 
+        {!isTamilAssignView && (
         <div className="space-y-6">
           <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl overflow-hidden">
             <div className="bg-[#141c2e] px-6 py-4 border-b border-[#1e2d47] flex items-center gap-3">
@@ -299,6 +623,7 @@ export default function DepartmentDashboard() {
             </div>
           </section>
         </div>
+        )}
       </div>
     </div>
   );
