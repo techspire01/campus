@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Settings, Department, Staff, Subject } from '../types';
-import { Plus, Trash2, Save, Settings as SettingsIcon, Users, BookOpen, Building2, Calendar, Loader2 } from 'lucide-react';
+import { Plus, Trash2, Save, Settings as SettingsIcon, BookOpen, Building2, Calendar, Loader2 } from 'lucide-react';
 
 export default function AdminDashboard() {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -11,7 +11,6 @@ export default function AdminDashboard() {
   const [status, setStatus] = useState<{ type: 'success' | 'error', msg: string } | null>(null);
 
   const [newDept, setNewDept] = useState({ name: '', type: 'core' });
-  const [newStaff, setNewStaff] = useState({ name: '', role: 'Staff', dept_id: '', max_workload: 18 });
   const [newSubject, setNewSubject] = useState({ name: '', code: '', type: 'core', dept_id: '', is_addon: false });
 
   useEffect(() => {
@@ -56,17 +55,6 @@ export default function AdminDashboard() {
     setStatus({ type: 'success', msg: 'Department deleted. Staff unlinked and classes removed.' });
     fetch('/api/departments').then(r => r.json()).then(setDepts);
     fetch('/api/staff').then(r => r.json()).then(setStaff);
-  };
-
-  const handleAddStaff = async () => {
-    const res = await fetch('/api/staff', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newStaff)
-    });
-    const data = await res.json();
-    setStaff([...staff, { ...newStaff, id: data.id } as Staff]);
-    setNewStaff({ name: '', role: 'Staff', dept_id: '', max_workload: 18 });
   };
 
   const handleAddSubject = async () => {
@@ -229,61 +217,6 @@ export default function AdminDashboard() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        {/* Staff Management */}
-        <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl overflow-hidden">
-          <div className="bg-[#141c2e] px-6 py-4 border-b border-[#1e2d47] flex items-center gap-3">
-            <Users className="text-emerald-400" size={20} />
-            <h2 className="font-mono font-bold text-white uppercase tracking-wider">Staff Master</h2>
-          </div>
-          <div className="p-6">
-            <div className="grid grid-cols-2 gap-2 mb-6">
-              <input 
-                placeholder="Staff Name" 
-                className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
-                value={newStaff.name}
-                onChange={e => setNewStaff({...newStaff, name: e.target.value})}
-              />
-              <select 
-                className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
-                value={newStaff.dept_id}
-                onChange={e => setNewStaff({...newStaff, dept_id: e.target.value})}
-              >
-                <option value="">Select Dept</option>
-                {depts.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
-              </select>
-              <select 
-                className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
-                value={newStaff.role}
-                onChange={e => setNewStaff({...newStaff, role: e.target.value as any})}
-              >
-                <option value="Staff">Regular Staff</option>
-                <option value="HOD">HOD</option>
-              </select>
-              <div className="flex gap-2">
-                <input 
-                  type="number" 
-                  placeholder="Max WL" 
-                  className="flex-1 bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
-                  value={newStaff.max_workload || ''}
-                  onChange={e => setNewStaff({...newStaff, max_workload: parseInt(e.target.value) || 0})}
-                />
-                <button onClick={handleAddStaff} className="bg-emerald-600 p-2 rounded hover:bg-emerald-500 transition-colors"><Plus size={20} /></button>
-              </div>
-            </div>
-            <div className="space-y-2 max-h-80 overflow-y-auto pr-2 custom-scrollbar">
-              {staff.map(s => (
-                <div key={s.id} className="flex justify-between items-center p-3 bg-[#141c2e] border border-[#1e2d47] rounded">
-                  <div>
-                    <div className="font-medium">{s.name}</div>
-                    <div className="text-[10px] text-slate-500 font-mono">{s.dept_name} • {s.role}</div>
-                  </div>
-                  <div className="text-xs font-mono text-emerald-400">{s.max_workload}h</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
-
         {/* Subjects */}
         <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl overflow-hidden">
           <div className="bg-[#141c2e] px-6 py-4 border-b border-[#1e2d47] flex items-center gap-3">

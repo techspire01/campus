@@ -1177,6 +1177,35 @@ async function startServer() {
     }
   });
 
+  app.patch('/api/staff/:id', async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { name, role, dept_id, max_workload } = req.body;
+      const { rows } = await pool.query(
+        `UPDATE cg_staff SET name = $1, role = $2, dept_id = $3, max_workload = $4
+         WHERE id = $5
+         RETURNING *`,
+        [name, role, dept_id || null, max_workload, id]
+      );
+      if (rows.length === 0) {
+        return res.status(404).json({ error: 'Staff member not found' });
+      }
+      res.json(rows[0]);
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.delete('/api/staff/:id', async (req, res) => {
+    try {
+      const { id } = req.params;
+      await pool.query('DELETE FROM cg_staff WHERE id = $1', [id]);
+      res.json({ success: true, message: 'Staff deleted successfully' });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
   app.get('/api/subjects', async (req, res) => {
     try {
       const { rows } = await pool.query('SELECT * FROM cg_subjects ORDER BY name');

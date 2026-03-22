@@ -21,6 +21,7 @@ import { twMerge } from 'tailwind-merge';
 import AdminDashboard from './pages/AdminDashboard';
 import DepartmentDashboard from './pages/DepartmentDashboard';
 import ClassDetails from './pages/ClassDetails';
+import StaffManagement from './pages/StaffManagement';
 import StaffTimetable from './pages/StaffTimetable';
 import StudentTimetable from './pages/StudentTimetable';
 import LabManagement from './pages/labs/LabManagement';
@@ -98,7 +99,27 @@ function DepartmentsList() {
 
 function AppContent() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isMobileOrTablet, setIsMobileOrTablet] = useState(window.innerWidth < 1024);
   const location = useLocation();
+
+  useEffect(() => {
+    const handleResize = () => {
+      const isSmallScreen = window.innerWidth < 1024;
+      setIsMobileOrTablet(isSmallScreen);
+      if (!isSmallScreen) {
+        setIsSidebarOpen(true);
+      }
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  useEffect(() => {
+    if (isMobileOrTablet) {
+      setIsSidebarOpen(false);
+    }
+  }, [isMobileOrTablet]);
 
   const isActive = (path: string) => location.pathname === path || location.pathname.startsWith(path + '/');
 
@@ -110,18 +131,30 @@ function AppContent() {
         !isSidebarOpen && "-translate-x-full"
       )}>
         <div className="h-full flex flex-col p-6">
-          <div className="flex items-center gap-3 mb-10 px-2">
-            <div className="w-10 h-10 bg-gradient-to-br from-cyan-500 to-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-cyan-500/20">
-              <Calendar className="text-white" size={24} />
+          <div className="flex items-center justify-between gap-3 mb-10 px-2">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-gradient-to-br from-cyan-500 to-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-cyan-500/20">
+                <Calendar className="text-white" size={24} />
+              </div>
+              <div>
+                <h2 className="text-xl font-mono font-black text-white tracking-tighter leading-none">CAMPUS<span className="text-cyan-500">GRID</span></h2>
+                <p className="text-[8px] font-mono text-slate-500 uppercase tracking-[0.3em] mt-1">Timetable Engine</p>
+              </div>
             </div>
-            <div>
-              <h2 className="text-xl font-mono font-black text-white tracking-tighter leading-none">CAMPUS<span className="text-cyan-500">GRID</span></h2>
-              <p className="text-[8px] font-mono text-slate-500 uppercase tracking-[0.3em] mt-1">Timetable Engine</p>
-            </div>
+            {isMobileOrTablet && (
+              <button
+                onClick={() => setIsSidebarOpen(false)}
+                className="p-2 text-slate-400 hover:text-white hover:bg-[#141c2e] rounded lg:hidden"
+                title="Close sidebar"
+              >
+                <X size={20} />
+              </button>
+            )}
           </div>
 
           <nav className="flex-1 space-y-2">
             <NavLink to="/admin" icon={LayoutDashboard} active={isActive('/admin')}>Admin Panel</NavLink>
+            <NavLink to="/staff" icon={Users} active={isActive('/staff')}>Staff Master</NavLink>
             <NavLink to="/departments" icon={Building2} active={isActive('/departments') || isActive('/department')}>Departments</NavLink>
             <NavLink to="/common" icon={BookOpen} active={isActive('/common')}>Common Subjects</NavLink>
             <NavLink to="/labs" icon={FlaskConical} active={isActive('/labs') && !isActive('/labs/requests')}>Lab Management</NavLink>
@@ -150,12 +183,15 @@ function AppContent() {
       {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0">
         <header className="h-16 border-b border-[#1e2d47] bg-[#0a0e17]/80 backdrop-blur-md sticky top-0 z-40 flex items-center justify-between px-8">
-          <button 
-            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-            className="lg:hidden p-2 text-slate-400 hover:text-white"
-          >
-            {isSidebarOpen ? <X size={24} /> : <Menu size={24} />}
-          </button>
+          {isMobileOrTablet && (
+            <button 
+              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+              className="p-2 text-slate-400 hover:text-white"
+              title={isSidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
+            >
+              {isSidebarOpen ? <X size={24} /> : <Menu size={24} />}
+            </button>
+          )}
           
           <div className="flex items-center gap-6">
             <div className="hidden sm:flex items-center gap-2 px-3 py-1 bg-[#141c2e] rounded-full border border-[#1e2d47]">
@@ -169,6 +205,7 @@ function AppContent() {
           <Routes>
             <Route path="/" element={<AdminDashboard />} />
             <Route path="/admin" element={<AdminDashboard />} />
+            <Route path="/staff" element={<StaffManagement />} />
             <Route path="/departments" element={<DepartmentsList />} />
             <Route path="/department/:id" element={<DepartmentDashboard />} />
             <Route path="/class/:id" element={<ClassDetails />} />
