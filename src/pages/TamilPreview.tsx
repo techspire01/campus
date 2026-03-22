@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Calendar, CheckCircle, Edit, RotateCcw } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Class, Settings } from '../types';
+import { emitDataInvalidation } from '../utils/dataInvalidation';
 
 interface TamilSlot {
   id?: number;
@@ -201,6 +202,7 @@ export default function TamilPreview() {
       }
       setStatus({ type: 'success', msg: 'Tamil slots finalized successfully!' });
       setHasChanges(false);
+      emitDataInvalidation(['staff_workload', 'tamil', 'timetable', 'classes'], 'TamilPreview.handleFix');
       setTimeout(() => navigate('/'), 2000);
     } catch (err: any) {
       setStatus({ type: 'error', msg: err.message });

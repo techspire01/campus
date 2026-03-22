@@ -1,8 +1,9 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Department, Class, Staff, Subject } from '../types';
-import { Plus, GraduationCap, ChevronRight, BarChart3, Lock } from 'lucide-react';
+import { Plus, GraduationCap, ChevronRight, BarChart3, Lock, RefreshCw } from 'lucide-react';
 import { clsx } from 'clsx';
+import { subscribeDataInvalidation } from '../utils/dataInvalidation';
 
 // Departments where class creation is disabled
 const RESTRICTED_DEPARTMENTS = ['tamil', 'english', 'mathematics'];
@@ -33,6 +34,18 @@ export default function DepartmentDashboard() {
   const [hoursByTamilClass, setHoursByTamilClass] = useState<Record<number, string>>({});
   const [staffByTamilClass, setStaffByTamilClass] = useState<Record<number, string>>({});
 
+  const loadStaff = useCallback(() => {
+    fetch('/api/staff', {
+      cache: 'no-store',
+      headers: {
+        'Cache-Control': 'no-cache',
+        Pragma: 'no-cache',
+      },
+    }).then(res => res.json()).then(data => {
+      setStaff(data as Staff[]);
+    });
+  }, []);
+
   const departmentStaff = useMemo(() => {
     const scoped = staff.filter(member => member.dept_id === deptId);
     const unique = new Map<string, Staff>();
@@ -57,13 +70,43 @@ export default function DepartmentDashboard() {
       setAllClasses(data as Class[]);
       setClasses((data as Class[]).filter((item: Class) => item.dept_id === deptId));
     });
-    fetch('/api/staff').then(res => res.json()).then(data => {
-      setStaff(data as Staff[]);
-    });
+    loadStaff();
     fetch('/api/subjects').then(res => res.json()).then(data => {
       setSubjects(data as Subject[]);
     });
-  }, [deptId]);
+  }, [deptId, loadStaff]);
+
+  useEffect(() => {
+    return subscribeDataInvalidation(({ scopes }) => {
+      if (
+        scopes.includes('staff_workload') ||
+        scopes.includes('tamil') ||
+        scopes.includes('classes') ||
+        scopes.includes('timetable') ||
+        scopes.includes('staff')
+      ) {
+        loadStaff();
+      }
+    });
+  }, [loadStaff]);
+
+  useEffect(() => {
+    const handlePageShow = () => {
+      loadStaff();
+    };
+
+    const handleWindowFocus = () => {
+      loadStaff();
+    };
+
+    window.addEventListener('pageshow', handlePageShow);
+    window.addEventListener('focus', handleWindowFocus);
+
+    return () => {
+      window.removeEventListener('pageshow', handlePageShow);
+      window.removeEventListener('focus', handleWindowFocus);
+    };
+  }, [loadStaff]);
 
   useEffect(() => {
     setSelectedTamilClassIds([]);
@@ -602,6 +645,13 @@ export default function DepartmentDashboard() {
             <div className="bg-[#141c2e] px-6 py-4 border-b border-[#1e2d47] flex items-center gap-3">
               <BarChart3 className="text-emerald-400" size={20} />
               <h2 className="font-mono font-bold text-white uppercase tracking-wider">Faculty Workload</h2>
+              <button
+                onClick={loadStaff}
+                className="ml-auto inline-flex items-center gap-2 rounded border border-[#1e2d47] px-2 py-1 text-[10px] font-mono uppercase tracking-wider text-slate-300 hover:border-cyan-500/40"
+              >
+                <RefreshCw size={12} />
+                Refresh
+              </button>
             </div>
             <div className="p-6 space-y-4">
               {departmentStaff.map(member => {

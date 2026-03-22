@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { BookOpen, Plus, Users, X } from 'lucide-react';
 import { Class, Staff, Subject } from '../types';
+import { emitDataInvalidation } from '../utils/dataInvalidation';
 
 type SubjectForm = {
   name: string;
@@ -117,6 +118,7 @@ export default function CommonSubjects() {
       return;
     }
 
+    emitDataInvalidation(['staff_workload', 'classes'], 'CommonSubjects.assignSubjectToSelectedClasses');
     setStatus({ type: 'success', msg: `Assigned to ${selectedClassIds.length} class(es).` });
   };
 

@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, Clock, FlaskConical, Plus, X, Lock, Send } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Class, ClassSubject, LabRequirement, Settings, Staff, Subject, TimetableSlot } from '../types';
+import { emitDataInvalidation } from '../utils/dataInvalidation';
 
 type CreateSubjectForm = {
   name: string;
@@ -145,6 +146,7 @@ export default function ClassDetails() {
       setStaffInput('');
       setNewCS({ hours_per_week: 4, is_lab_required: false });
       refreshData();
+      emitDataInvalidation(['staff_workload', 'classes'], 'ClassDetails.handleAddSubject');
       setStatus({ type: 'success', msg: 'Subject assigned successfully.' });
     } else {
       const err = await res.json();
@@ -188,6 +190,7 @@ export default function ClassDetails() {
         is_lab_required: false
       });
       refreshData();
+      emitDataInvalidation(['staff_workload', 'classes'], 'ClassDetails.handleCreateAndAssign');
       setStatus({ type: 'success', msg: 'Subject created and assigned successfully.' });
     } else {
       const err = await res.json();
@@ -259,6 +262,7 @@ export default function ClassDetails() {
     if (res.ok) {
       setEditingSubjectId(null);
       refreshData();
+      emitDataInvalidation(['staff_workload', 'classes'], 'ClassDetails.handleSaveSubjectEdit');
       setStatus({ type: 'success', msg: 'Subject assignment updated successfully.' });
     } else {
       const err = await res.json();
@@ -285,6 +289,7 @@ export default function ClassDetails() {
 
     if (res.ok) {
       refreshData();
+      emitDataInvalidation(['staff_workload', 'classes'], 'ClassDetails.handleUnassignStaff');
       setStatus({ type: 'success', msg: 'Staff unassigned successfully.' });
     } else {
       const err = await res.json();
@@ -306,6 +311,7 @@ export default function ClassDetails() {
     if (res.ok) {
       setEditingSubjectId(null);
       refreshData();
+      emitDataInvalidation(['staff_workload', 'classes', 'timetable'], 'ClassDetails.handleUnassignSubject');
       setStatus({ type: 'success', msg: 'Subject unassigned successfully.' });
     } else {
       const err = await res.json();

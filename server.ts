@@ -1053,8 +1053,21 @@ async function startServer() {
   app.get('/api/staff', async (req, res) => {
     try {
       const { rows } = await pool.query(`
-        SELECT s.*, d.name AS dept_name,
-               COALESCE((SELECT SUM(hours_per_week) FROM cg_class_subjects WHERE staff_id = s.id), 0) AS current_workload
+        SELECT
+          s.*,
+          d.name AS dept_name,
+          GREATEST(
+            COALESCE((
+              SELECT SUM(hours_per_week)
+              FROM cg_class_subjects
+              WHERE staff_id = s.id
+            ), 0),
+            COALESCE((
+              SELECT COUNT(*)
+              FROM cg_timetable_slots
+              WHERE staff_id = s.id
+            ), 0)
+          ) AS current_workload
         FROM cg_staff s
         LEFT JOIN cg_departments d ON s.dept_id = d.id
         ORDER BY s.name
@@ -2624,6 +2637,31 @@ async function startServer() {
         LEFT JOIN cg_labs l ON ts.lab_id = l.id
         WHERE ts.class_id = $1
       `, [classId]);
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/timetable/staff/:staffId', async (req, res) => {
+    try {
+      const staffId = Number(req.params.staffId);
+      const { rows } = await pool.query(`
+        SELECT
+          ts.*,
+          c.name AS class_name,
+          s.name AS subject_name,
+          s.code AS subject_code,
+          st.name AS staff_name,
+          l.name AS lab_name
+        FROM cg_timetable_slots ts
+        JOIN cg_classes c ON c.id = ts.class_id
+        LEFT JOIN cg_subjects s ON ts.subject_id = s.id
+        LEFT JOIN cg_staff st ON ts.staff_id = st.id
+        LEFT JOIN cg_labs l ON ts.lab_id = l.id
+        WHERE ts.staff_id = $1
+        ORDER BY ts.day_order, ts.period, c.name
+      `, [staffId]);
       res.json(rows);
     } catch (e: any) {
       res.status(500).json({ error: e.message });

@@ -1,38 +1,77 @@
 import React, { useState, useEffect, Fragment } from 'react';
 import { useParams } from 'react-router-dom';
 import { Staff, TimetableSlot, Settings } from '../types';
-import { Clock, User, Calendar, CheckCircle2 } from 'lucide-react';
+import { Calendar, CheckCircle2 } from 'lucide-react';
 import { clsx } from 'clsx';
+import { subscribeDataInvalidation } from '../utils/dataInvalidation';
 
 export default function StaffTimetable() {
   const { id } = useParams();
   const [staff, setStaff] = useState<Staff | null>(null);
-  const [timetable, setTimetable] = useState<any[]>([]);
+  const [timetable, setTimetable] = useState<(TimetableSlot & { class_name?: string; lab_name?: string })[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
 
   useEffect(() => {
-    fetch('/api/staff').then(res => res.json()).then(data => {
-      setStaff(data.find((x: any) => x.id === parseInt(id!)));
-    });
-    // For staff, we need to fetch all slots across all classes where they are assigned
-    // I'll add a specific endpoint for this in server.ts later, but for now I'll fetch all and filter
-    fetch('/api/settings').then(res => res.json()).then(setSettings);
-    
-    // Fetching all timetable slots for this staff
-    // In a real app, I'd have /api/timetable/staff/:id
-    // I'll simulate it by fetching all classes and their slots
-    const fetchStaffData = async () => {
-      const classesRes = await fetch('/api/classes');
-      const classes = await classesRes.json();
-      const allSlots: any[] = [];
-      for (const cls of classes) {
-        const slotsRes = await fetch(`/api/timetable/${cls.id}`);
-        const slots = await slotsRes.json();
-        allSlots.push(...slots.filter((s: any) => s.staff_id === parseInt(id!)).map((s: any) => ({ ...s, class_name: cls.name })));
-      }
-      setTimetable(allSlots);
+    if (!id) return;
+
+    const staffId = parseInt(id, 10);
+
+    const loadStaff = async () => {
+      const res = await fetch('/api/staff', {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache',
+          Pragma: 'no-cache',
+        },
+      });
+      const data = await res.json();
+      setStaff(data.find((x: Staff) => x.id === staffId) || null);
     };
-    fetchStaffData();
+
+    const loadTimetable = async () => {
+      const res = await fetch(`/api/timetable/staff/${staffId}`, {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache',
+          Pragma: 'no-cache',
+        },
+      });
+      const data = await res.json();
+      setTimetable(Array.isArray(data) ? data : []);
+    };
+
+    const refreshData = async () => {
+      await Promise.all([
+        loadStaff(),
+        loadTimetable(),
+      ]);
+    };
+
+    fetch('/api/settings').then(res => res.json()).then(setSettings);
+    refreshData();
+
+    const unsubscribe = subscribeDataInvalidation(({ scopes }) => {
+      if (scopes.includes('staff_workload') || scopes.includes('timetable') || scopes.includes('staff')) {
+        refreshData();
+      }
+    });
+
+    const handlePageShow = () => {
+      refreshData();
+    };
+
+    const handleWindowFocus = () => {
+      refreshData();
+    };
+
+    window.addEventListener('pageshow', handlePageShow);
+    window.addEventListener('focus', handleWindowFocus);
+
+    return () => {
+      unsubscribe();
+      window.removeEventListener('pageshow', handlePageShow);
+      window.removeEventListener('focus', handleWindowFocus);
+    };
   }, [id]);
 
   if (!staff || !settings) return <div className="text-cyan-400 font-mono">Loading staff timetable...</div>;
