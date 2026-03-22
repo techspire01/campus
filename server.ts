@@ -138,6 +138,19 @@ async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (session_id, class_id, day_order, period)
     );
+
+    CREATE TABLE IF NOT EXISTS cg_english_preview_slots (
+      id SERIAL PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      class_id INTEGER NOT NULL REFERENCES cg_classes(id) ON DELETE CASCADE,
+      subject_id INTEGER NOT NULL REFERENCES cg_subjects(id) ON DELETE CASCADE,
+      staff_id INTEGER REFERENCES cg_staff(id) ON DELETE SET NULL,
+      day_order INTEGER NOT NULL,
+      period INTEGER NOT NULL,
+      hours_per_week INTEGER NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (session_id, class_id, day_order, period)
+    );
   `);
 
   await pool.query(`
@@ -901,6 +914,27 @@ interface TamilSchedulerResponse {
   error?: string;
 }
 
+interface EnglishSchedulerRequest {
+  selected_classes: Array<{ id: number; dept_id: number; year: number; name?: string }>;
+  staff_assignments: Record<number, number>;
+  hours_assignments: Record<number, number>;
+  days: number[];
+  periods_per_day: number;
+  occupied_slots: Record<string, Array<{ day_order: number; period: number }>>;
+  occupied_staff_slots: Record<string, Array<{ day_order: number; period: number }>>;
+  subject_id: number;
+}
+
+interface EnglishSchedulerResponse {
+  scheduled_slots?: Array<{
+    class_id: number;
+    day_order: number;
+    period: number;
+    staff_id: number | null;
+  }>;
+  error?: string;
+}
+
 function runTamilScheduler(payload: TamilSchedulerRequest): Promise<TamilSchedulerResponse> {
   return new Promise((resolve, reject) => {
     const configuredPython = process.env.PYTHON_PATH;
@@ -945,6 +979,58 @@ function runTamilScheduler(payload: TamilSchedulerRequest): Promise<TamilSchedul
         resolve(parsed);
       } catch (parseErr) {
         reject(new Error(`Invalid Tamil scheduler JSON output: ${stdout.substring(0, 200)}`));
+      }
+    });
+
+    python.stdin.write(JSON.stringify(payload));
+    python.stdin.end();
+  });
+}
+
+function runEnglishScheduler(payload: EnglishSchedulerRequest): Promise<EnglishSchedulerResponse> {
+  return new Promise((resolve, reject) => {
+    const configuredPython = process.env.PYTHON_PATH;
+    const workspaceVenvWindows = path.join(process.cwd(), '.venv', 'Scripts', 'python.exe');
+    const workspaceVenvUnix = path.join(process.cwd(), '.venv', 'bin', 'python');
+    const pythonBinary = configuredPython
+      || (fs.existsSync(workspaceVenvWindows) ? workspaceVenvWindows : '')
+      || (fs.existsSync(workspaceVenvUnix) ? workspaceVenvUnix : '')
+      || 'python';
+    const scriptPath = path.join(process.cwd(), 'scheduler', 'english_scheduler.py');
+    const python = spawn(pythonBinary, [scriptPath]);
+
+    let stdout = '';
+    let stderr = '';
+
+    python.stdout.on('data', (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+
+    python.stderr.on('data', (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+
+    python.on('error', (err: any) => {
+      reject(new Error(`English scheduler process error: ${err.message}`));
+    });
+
+    python.on('close', code => {
+      if (code !== 0) {
+        reject(new Error(`English scheduler failed with code ${code}: ${stderr || stdout || 'No output'}`));
+        return;
+      }
+
+      if (!stdout || stdout.trim() === '') {
+        reject(new Error('English scheduler produced no output'));
+        return;
+      }
+
+      try {
+        const trimmed = stdout.trim();
+        const parsed = JSON.parse(trimmed) as EnglishSchedulerResponse;
+        resolve(parsed);
+      } catch (parseErr) {
+        reject(new Error(`Invalid English scheduler JSON output: ${stdout.substring(0, 200)}`));
       }
     });
 
@@ -3774,6 +3860,479 @@ async function startServer() {
     } catch (e: any) {
       console.error('Tamil regeneration error:', e);
       res.status(500).json({ error: e.message || 'Tamil regeneration failed' });
+    }
+  });
+
+  // English Scheduling Endpoints
+  app.post('/api/english/schedule', async (req, res) => {
+    try {
+      const { selectedClassIds, staffAssignments, hoursAssignments, subjectId } = req.body;
+
+      if (!selectedClassIds || !Array.isArray(selectedClassIds) || selectedClassIds.length === 0) {
+        return res.status(400).json({ error: 'Invalid or empty selectedClassIds' });
+      }
+      if (!staffAssignments || typeof staffAssignments !== 'object') {
+        return res.status(400).json({ error: 'Invalid staffAssignments' });
+      }
+      if (!hoursAssignments || typeof hoursAssignments !== 'object') {
+        return res.status(400).json({ error: 'Invalid hoursAssignments' });
+      }
+      if (!subjectId || Number.isNaN(Number(subjectId))) {
+        return res.status(400).json({ error: 'Invalid subjectId' });
+      }
+
+      const classRows = await pool.query(
+        `SELECT id, dept_id, year, name FROM cg_classes WHERE id = ANY($1::int[])`,
+        [selectedClassIds]
+      );
+      const classDetails = classRows.rows as Array<{ id: number; dept_id: number; year: number; name: string }>;
+
+      if (classDetails.length === 0) {
+        return res.status(400).json({ error: 'No classes found for the given IDs' });
+      }
+
+      const settingsRows = await pool.query('SELECT key, value FROM cg_settings');
+      const settings = settingsRows.rows.reduce((acc: Record<string, string>, row: any) => {
+        acc[row.key] = row.value;
+        return acc;
+      }, {});
+      const periodsPerDay = Math.max(1, Number(settings.periods_per_day || 6));
+
+      const occupiedRows = await pool.query(
+        `SELECT class_id, day_order, period FROM cg_timetable_slots WHERE class_id = ANY($1::int[])`,
+        [selectedClassIds]
+      );
+
+      const occupied: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const classId of selectedClassIds) {
+        occupied[String(classId)] = [];
+      }
+      for (const row of occupiedRows.rows as any[]) {
+        occupied[String(row.class_id)].push({ day_order: row.day_order, period: row.period });
+      }
+
+      const assignedStaffIds = [...new Set(
+        Object.values(staffAssignments)
+          .map(value => Number(value))
+          .filter(value => Number.isFinite(value) && value > 0)
+      )];
+      const occupiedStaff: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const staffId of assignedStaffIds) {
+        occupiedStaff[String(staffId)] = [];
+      }
+      if (assignedStaffIds.length > 0) {
+        const staffOccupiedRows = await pool.query(
+          `SELECT staff_id, day_order, period
+           FROM cg_timetable_slots
+           WHERE staff_id = ANY($1::int[])`,
+          [assignedStaffIds]
+        );
+        for (const row of staffOccupiedRows.rows as any[]) {
+          if (!row.staff_id) continue;
+          occupiedStaff[String(row.staff_id)] ??= [];
+          occupiedStaff[String(row.staff_id)].push({ day_order: row.day_order, period: row.period });
+        }
+      }
+
+      const schedule = await runEnglishScheduler({
+        selected_classes: classDetails,
+        staff_assignments: staffAssignments,
+        hours_assignments: hoursAssignments,
+        days: [1, 2, 3, 4, 5, 6],
+        periods_per_day: periodsPerDay,
+        occupied_slots: occupied,
+        occupied_staff_slots: occupiedStaff,
+        subject_id: Number(subjectId),
+      });
+
+      if (schedule.error) {
+        return res.status(400).json({ error: schedule.error });
+      }
+
+      if (!schedule.scheduled_slots || !Array.isArray(schedule.scheduled_slots)) {
+        return res.status(400).json({ error: 'Scheduler returned invalid slots format' });
+      }
+
+      if (schedule.scheduled_slots.length === 0) {
+        return res.status(400).json({ error: 'No available slots found for scheduling' });
+      }
+
+      const sessionId = `english_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+
+      await pool.query('DELETE FROM cg_english_preview_slots WHERE session_id = $1', [sessionId]);
+
+      for (const slot of schedule.scheduled_slots) {
+        try {
+          await pool.query(
+            `INSERT INTO cg_english_preview_slots (session_id, class_id, subject_id, staff_id, day_order, period, hours_per_week)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [
+              sessionId,
+              Number(slot.class_id),
+              Number(subjectId),
+              slot.staff_id ? Number(slot.staff_id) : null,
+              Number(slot.day_order),
+              Number(slot.period),
+              Number(hoursAssignments[slot.class_id] || 1),
+            ]
+          );
+        } catch (insertErr) {
+          console.error('Failed to insert slot:', insertErr);
+        }
+      }
+
+      res.json({ sessionId, slots: schedule.scheduled_slots, slotCount: schedule.scheduled_slots.length });
+    } catch (e: any) {
+      console.error('English scheduling error:', e);
+      res.status(500).json({ error: e.message || 'English scheduling failed' });
+    }
+  });
+
+  app.get('/api/english/preview/:sessionId', async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+      const previewRows = await pool.query(
+        `SELECT p.id, p.session_id, p.class_id, c.name AS class_name, c.year, d.name AS dept_name,
+                p.subject_id, p.staff_id, p.day_order, p.period, p.hours_per_week
+         FROM cg_english_preview_slots p
+         JOIN cg_classes c ON c.id = p.class_id
+         LEFT JOIN cg_departments d ON d.id = c.dept_id
+         WHERE p.session_id = $1
+         ORDER BY p.class_id, p.day_order, p.period`,
+        [sessionId]
+      );
+
+      const classIds = [...new Set((previewRows.rows as any[]).map(row => Number(row.class_id)).filter(Boolean))];
+      let timetableRows: any[] = [];
+      let staffBusyRows: any[] = [];
+
+      if (classIds.length > 0) {
+        const timetableResult = await pool.query(
+          `SELECT ts.id, ts.class_id, c.name AS class_name, c.year, d.name AS dept_name, ts.subject_id, s.name AS subject_name, s.code AS subject_code,
+                  ts.staff_id, st.name AS staff_name, l.name AS lab_name, ts.day_order, ts.period, ts.type
+           FROM cg_timetable_slots ts
+           JOIN cg_classes c ON c.id = ts.class_id
+           LEFT JOIN cg_departments d ON d.id = c.dept_id
+           LEFT JOIN cg_subjects s ON s.id = ts.subject_id
+           LEFT JOIN cg_staff st ON st.id = ts.staff_id
+           LEFT JOIN cg_labs l ON l.id = ts.lab_id
+           WHERE ts.class_id = ANY($1::int[])
+           ORDER BY ts.class_id, ts.day_order, ts.period`,
+          [classIds]
+        );
+        timetableRows = timetableResult.rows;
+
+        const previewStaffIds = [...new Set(
+          (previewRows.rows as any[])
+            .map(row => Number(row.staff_id))
+            .filter(value => Number.isFinite(value) && value > 0)
+        )];
+        if (previewStaffIds.length > 0) {
+          const staffBusyResult = await pool.query(
+            `SELECT staff_id, class_id, day_order, period
+             FROM cg_timetable_slots
+             WHERE staff_id = ANY($1::int[])`,
+            [previewStaffIds]
+          );
+          const classToStaff = new Map<number, number>();
+          for (const row of previewRows.rows as any[]) {
+            if (row.staff_id) classToStaff.set(Number(row.class_id), Number(row.staff_id));
+          }
+          for (const [classId, staffId] of classToStaff.entries()) {
+            for (const row of staffBusyResult.rows as any[]) {
+              if (Number(row.staff_id) !== staffId) continue;
+              if (Number(row.class_id) === classId) continue;
+              staffBusyRows.push({
+                class_id: classId,
+                staff_id: staffId,
+                day_order: Number(row.day_order),
+                period: Number(row.period),
+              });
+            }
+          }
+        }
+      }
+
+      res.json({ previewSlots: previewRows.rows, timetableSlots: timetableRows, staffBusySlots: staffBusyRows });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/english/fix/:sessionId', async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+
+      await inTransaction(async client => {
+        const previewRows = await client.query(
+          `SELECT class_id, subject_id, staff_id, day_order, period, hours_per_week
+           FROM cg_english_preview_slots
+           WHERE session_id = $1`,
+          [sessionId]
+        );
+
+        if ((previewRows.rowCount ?? 0) === 0) {
+          throw new Error('Preview session not found.');
+        }
+
+        const existingPreview = previewRows.rows as Array<{
+          class_id: number;
+          subject_id: number;
+          staff_id: number | null;
+          day_order: number;
+          period: number;
+          hours_per_week: number;
+        }>;
+
+        const requestedPreviewSlots = Array.isArray(req.body?.previewSlots) ? req.body.previewSlots : null;
+        const classMeta = new Map<number, { subject_id: number; staff_id: number | null; hours_per_week: number; count: number }>();
+        for (const row of existingPreview) {
+          const current = classMeta.get(row.class_id);
+          if (current) {
+            current.count += 1;
+          } else {
+            classMeta.set(row.class_id, {
+              subject_id: Number(row.subject_id),
+              staff_id: row.staff_id ? Number(row.staff_id) : null,
+              hours_per_week: Number(row.hours_per_week || 1),
+              count: 1,
+            });
+          }
+        }
+
+        const finalPreviewRows = requestedPreviewSlots
+          ? requestedPreviewSlots.map((slot: any) => {
+              const classId = Number(slot?.class_id);
+              const dayOrder = Number(slot?.day_order);
+              const period = Number(slot?.period);
+              const meta = classMeta.get(classId);
+              if (!classId || !dayOrder || !period || !meta) {
+                throw new Error('Invalid edited English preview slots.');
+              }
+              return {
+                class_id: classId,
+                subject_id: meta.subject_id,
+                staff_id: meta.staff_id,
+                day_order: dayOrder,
+                period,
+                hours_per_week: meta.hours_per_week,
+              };
+            })
+          : existingPreview;
+
+        const finalCounts = new Map<number, number>();
+        const previewKeys = new Set<string>();
+        for (const row of finalPreviewRows) {
+          const key = `${row.class_id}-${row.day_order}-${row.period}`;
+          if (previewKeys.has(key)) {
+            throw new Error(`Duplicate English preview slot at Day ${row.day_order} Period ${row.period} for class ${row.class_id}.`);
+          }
+          previewKeys.add(key);
+          finalCounts.set(row.class_id, (finalCounts.get(row.class_id) || 0) + 1);
+        }
+
+        for (const [classId, meta] of classMeta.entries()) {
+          if ((finalCounts.get(classId) || 0) !== meta.count) {
+            throw new Error('English preview slot count mismatch. Refresh the preview and try again.');
+          }
+        }
+
+        const selectedClassIds = [...classMeta.keys()];
+        const occupiedRows = await client.query(
+          `SELECT class_id, day_order, period
+           FROM cg_timetable_slots
+           WHERE class_id = ANY($1::int[])`,
+          [selectedClassIds]
+        );
+
+        const occupiedKeys = new Set(
+          (occupiedRows.rows as Array<{ class_id: number; day_order: number; period: number }>).map(
+            row => `${row.class_id}-${row.day_order}-${row.period}`
+          )
+        );
+        const staffIds = [...new Set(
+          finalPreviewRows
+            .map(row => row.staff_id ? Number(row.staff_id) : 0)
+            .filter(value => value > 0)
+        )];
+        const staffOccupiedKeys = new Set<string>();
+        if (staffIds.length > 0) {
+          const staffOccupiedRows = await client.query(
+            `SELECT staff_id, class_id, day_order, period
+             FROM cg_timetable_slots
+             WHERE staff_id = ANY($1::int[])`,
+            [staffIds]
+          );
+          for (const row of staffOccupiedRows.rows as Array<{ staff_id: number; class_id: number; day_order: number; period: number }>) {
+            staffOccupiedKeys.add(`${row.staff_id}-${row.day_order}-${row.period}`);
+          }
+        }
+        const previewStaffKeys = new Set<string>();
+
+        for (const row of finalPreviewRows) {
+          const key = `${row.class_id}-${row.day_order}-${row.period}`;
+          if (occupiedKeys.has(key)) {
+            throw new Error(`English slot conflicts with an occupied timetable slot at Day ${row.day_order} Period ${row.period} for class ${row.class_id}.`);
+          }
+          if (row.staff_id) {
+            const staffKey = `${row.staff_id}-${row.day_order}-${row.period}`;
+            if (staffOccupiedKeys.has(staffKey)) {
+              throw new Error(`English slot conflicts with the assigned staff timetable at Day ${row.day_order} Period ${row.period} for staff ${row.staff_id}.`);
+            }
+            if (previewStaffKeys.has(staffKey)) {
+              throw new Error(`English preview creates a staff overlap at Day ${row.day_order} Period ${row.period} for staff ${row.staff_id}.`);
+            }
+            previewStaffKeys.add(staffKey);
+          }
+        }
+
+        for (const row of finalPreviewRows) {
+          await client.query(
+            `INSERT INTO cg_timetable_slots (class_id, subject_id, staff_id, day_order, period, type)
+             VALUES ($1, $2, $3, $4, $5, 'english')
+             ON CONFLICT (class_id, day_order, period) DO UPDATE
+             SET subject_id = EXCLUDED.subject_id, staff_id = EXCLUDED.staff_id, type = EXCLUDED.type`,
+            [row.class_id, row.subject_id, row.staff_id, row.day_order, row.period]
+          );
+        }
+
+        await client.query('DELETE FROM cg_english_preview_slots WHERE session_id = $1', [sessionId]);
+      });
+
+      res.json({ success: true, message: 'English slots finalized' });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/english/regenerate/:sessionId', async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+
+      const previewRows = await pool.query(
+        `SELECT class_id, subject_id, staff_id, day_order, period, hours_per_week
+         FROM cg_english_preview_slots
+         WHERE session_id = $1`,
+        [sessionId]
+      );
+
+      if (previewRows.rows.length === 0) {
+        return res.status(404).json({ error: 'Preview session not found' });
+      }
+
+      const previewSlots = previewRows.rows as any[];
+      const selectedClassIds = [...new Set(previewSlots.map(s => s.class_id))];
+      const subjectId = previewSlots[0]?.subject_id;
+      const staffAssignments: Record<string, number> = {};
+      const hoursAssignments: Record<string, number> = {};
+
+      for (const slot of previewSlots) {
+        if (slot.staff_id && !staffAssignments[slot.class_id]) {
+          staffAssignments[slot.class_id] = slot.staff_id;
+        }
+        if (!hoursAssignments[slot.class_id]) {
+          hoursAssignments[slot.class_id] = slot.hours_per_week;
+        }
+      }
+
+      const classRows = await pool.query(
+        `SELECT id, dept_id, year, name FROM cg_classes WHERE id = ANY($1::int[])`,
+        [selectedClassIds]
+      );
+      const classDetails = classRows.rows as Array<{ id: number; dept_id: number; year: number; name: string }>;
+
+      const settingsRows = await pool.query('SELECT key, value FROM cg_settings');
+      const settings = settingsRows.rows.reduce((acc: Record<string, string>, row: any) => {
+        acc[row.key] = row.value;
+        return acc;
+      }, {});
+      const periodsPerDay = Math.max(1, Number(settings.periods_per_day || 6));
+
+      const occupiedRows = await pool.query(
+        `SELECT class_id, day_order, period FROM cg_timetable_slots WHERE class_id = ANY($1::int[])`,
+        [selectedClassIds]
+      );
+
+      const occupied: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const classId of selectedClassIds) {
+        occupied[String(classId)] = [];
+      }
+      for (const row of occupiedRows.rows as any[]) {
+        occupied[String(row.class_id)].push({ day_order: row.day_order, period: row.period });
+      }
+
+      const assignedStaffIds = [...new Set(
+        Object.values(staffAssignments)
+          .map(value => Number(value))
+          .filter(value => Number.isFinite(value) && value > 0)
+      )];
+      const occupiedStaff: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const staffId of assignedStaffIds) {
+        occupiedStaff[String(staffId)] = [];
+      }
+      if (assignedStaffIds.length > 0) {
+        const staffOccupiedRows = await pool.query(
+          `SELECT staff_id, day_order, period
+           FROM cg_timetable_slots
+           WHERE staff_id = ANY($1::int[])`,
+          [assignedStaffIds]
+        );
+        for (const row of staffOccupiedRows.rows as any[]) {
+          if (!row.staff_id) continue;
+          occupiedStaff[String(row.staff_id)] ??= [];
+          occupiedStaff[String(row.staff_id)].push({ day_order: row.day_order, period: row.period });
+        }
+      }
+
+      const schedule = await runEnglishScheduler({
+        selected_classes: classDetails,
+        staff_assignments: staffAssignments,
+        hours_assignments: hoursAssignments,
+        days: [1, 2, 3, 4, 5, 6],
+        periods_per_day: periodsPerDay,
+        occupied_slots: occupied,
+        occupied_staff_slots: occupiedStaff,
+        subject_id: Number(subjectId),
+      });
+
+      if (schedule.error) {
+        return res.status(400).json({ error: schedule.error });
+      }
+
+      if (!schedule.scheduled_slots || !Array.isArray(schedule.scheduled_slots)) {
+        return res.status(400).json({ error: 'Scheduler returned invalid slots format' });
+      }
+
+      if (schedule.scheduled_slots.length === 0) {
+        return res.status(400).json({ error: 'No available slots found for regeneration' });
+      }
+
+      await pool.query('DELETE FROM cg_english_preview_slots WHERE session_id = $1', [sessionId]);
+
+      for (const slot of schedule.scheduled_slots) {
+        try {
+          await pool.query(
+            `INSERT INTO cg_english_preview_slots (session_id, class_id, subject_id, staff_id, day_order, period, hours_per_week)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [
+              sessionId,
+              Number(slot.class_id),
+              Number(subjectId),
+              slot.staff_id ? Number(slot.staff_id) : null,
+              Number(slot.day_order),
+              Number(slot.period),
+              Number(hoursAssignments[slot.class_id] || 1),
+            ]
+          );
+        } catch (insertErr) {
+          console.error('Failed to insert regenerated slot:', insertErr);
+        }
+      }
+
+      res.json({ success: true, message: 'Timetable regenerated successfully', slotCount: schedule.scheduled_slots.length });
+    } catch (e: any) {
+      console.error('English regeneration error:', e);
+      res.status(500).json({ error: e.message || 'English regeneration failed' });
     }
   });
 

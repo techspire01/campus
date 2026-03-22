@@ -29,6 +29,7 @@ import LabTimetable from './pages/labs/LabTimetable';
 import PlacementManagement from './pages/PlacementManagement';
 import PlacementPreview from './pages/PlacementPreview';
 import TamilPreview from './pages/TamilPreview';
+import EnglishPreview from './pages/EnglishPreview';
 import GlobalTimetables from './pages/GlobalTimetables';
 import CommonSubjects from './pages/CommonSubjects';
 
@@ -180,6 +181,7 @@ function AppContent() {
             <Route path="/placement" element={<PlacementManagement />} />
             <Route path="/placement/preview/:blockId" element={<PlacementPreview />} />
             <Route path="/tamil/preview/:sessionId" element={<TamilPreview />} />
+            <Route path="/english/preview/:sessionId" element={<EnglishPreview />} />
             <Route path="/timetables" element={<GlobalTimetables />} />
           </Routes>
         </div>

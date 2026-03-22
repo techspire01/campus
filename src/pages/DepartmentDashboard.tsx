@@ -81,6 +81,7 @@ export default function DepartmentDashboard() {
       if (
         scopes.includes('staff_workload') ||
         scopes.includes('tamil') ||
+        scopes.includes('english') ||
         scopes.includes('classes') ||
         scopes.includes('timetable') ||
         scopes.includes('staff')
@@ -165,13 +166,19 @@ export default function DepartmentDashboard() {
   if (!dept) return <div className="text-cyan-400 font-mono">Loading department data...</div>;
 
   const isClassCreationDisabled = RESTRICTED_DEPARTMENTS.includes(dept.name.toLowerCase());
+  const normalizedDeptName = dept.name.trim().toLowerCase();
   const isTamilDepartment = dept.name.trim().toLowerCase() === 'tamil';
-  const isTamilAssignView = isTamilDepartment && activeTamilView === 'assign';
+  const isEnglishDepartment = normalizedDeptName === 'english';
+  const isLanguageDepartment = isTamilDepartment || isEnglishDepartment;
+  const activeLanguage = isEnglishDepartment ? 'english' : 'tamil';
+  const languageLabel = isEnglishDepartment ? 'English' : 'Tamil';
+  const languageScope = isEnglishDepartment ? 'english' : 'tamil';
+  const isTamilAssignView = isLanguageDepartment && activeTamilView === 'assign';
 
   const tamilSubject = subjects.find(subject => {
     if (subject.dept_id !== deptId) return false;
     const subjectName = subject.name.trim().toLowerCase();
-    return subjectName === 'tamil' || subjectName.includes('tamil');
+    return subjectName === activeLanguage || subjectName.includes(activeLanguage);
   });
 
   const filteredTamilClasses = allClasses.filter(item => {
@@ -226,12 +233,12 @@ export default function DepartmentDashboard() {
     setStatus(null);
 
     if (!tamilSubject) {
-      setStatus({ type: 'error', msg: 'Tamil subject is not available for this department.' });
+      setStatus({ type: 'error', msg: `${languageLabel} subject is not available for this department.` });
       return;
     }
 
     if (selectedTamilClassIds.length === 0) {
-      setStatus({ type: 'error', msg: 'Select at least one class to add Tamil.' });
+      setStatus({ type: 'error', msg: `Select at least one class to add ${languageLabel}.` });
       return;
     }
 
@@ -256,7 +263,7 @@ export default function DepartmentDashboard() {
     }
 
     try {
-      const scheduleRes = await fetch('/api/tamil/schedule', {
+      const scheduleRes = await fetch(`/api/${languageScope}/schedule`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -270,12 +277,12 @@ export default function DepartmentDashboard() {
       const scheduleData = await scheduleRes.json();
 
       if (!scheduleRes.ok) {
-        setStatus({ type: 'error', msg: scheduleData.error || 'Failed to schedule Tamil' });
+        setStatus({ type: 'error', msg: scheduleData.error || `Failed to schedule ${languageLabel}` });
         return;
       }
 
-      setStatus({ type: 'success', msg: `Tamil schedule generated. Redirecting to preview...` });
-      setTimeout(() => navigate(`/tamil/preview/${scheduleData.sessionId}`), 1000);
+      setStatus({ type: 'success', msg: `${languageLabel} schedule generated. Redirecting to preview...` });
+      setTimeout(() => navigate(`/${languageScope}/preview/${scheduleData.sessionId}`), 1000);
     } catch (err: any) {
       setStatus({ type: 'error', msg: err.message });
     }
@@ -301,9 +308,9 @@ export default function DepartmentDashboard() {
         </div>
       </header>
 
-      {isTamilDepartment && (
+      {isLanguageDepartment && (
         <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl p-4">
-          <div className="text-[10px] font-mono text-cyan-500 uppercase tracking-[0.2em] mb-3">Tamil Department Options</div>
+          <div className="text-[10px] font-mono text-cyan-500 uppercase tracking-[0.2em] mb-3">{languageLabel} Department Options</div>
           <div className="flex gap-2 flex-wrap">
             <button
               onClick={() => setActiveTamilView('staff')}
@@ -325,7 +332,7 @@ export default function DepartmentDashboard() {
                   : 'bg-[#141c2e] border-[#1e2d47] text-slate-300 hover:border-cyan-500/40'
               )}
             >
-              Select Classes & Add Tamil
+              {`Select Classes & Add ${languageLabel}`}
             </button>
           </div>
         </section>
@@ -338,7 +345,7 @@ export default function DepartmentDashboard() {
               <div className="flex items-center gap-3">
                 <GraduationCap className="text-cyan-400" size={20} />
                 <h2 className="font-mono font-bold text-white uppercase tracking-wider">
-                  {isTamilAssignView ? 'Tamil Class Allocation' : 'Academic Classes'}
+                  {isTamilAssignView ? `${languageLabel} Class Allocation` : 'Academic Classes'}
                 </h2>
               </div>
             </div>
@@ -445,7 +452,7 @@ export default function DepartmentDashboard() {
                   <div className="rounded-lg border border-[#1e2d47] overflow-hidden">
                     <div className="grid grid-cols-3 bg-[#141c2e] border-b border-[#1e2d47] text-[10px] font-mono uppercase tracking-wider text-slate-400">
                       <div className="px-4 py-3">Class Name</div>
-                      <div className="px-4 py-3">Tamil Staff</div>
+                      <div className="px-4 py-3">{languageLabel} Staff</div>
                       <div className="px-4 py-3">Hours / Week</div>
                     </div>
                     <div className="divide-y divide-[#1e2d47]">
@@ -491,7 +498,7 @@ export default function DepartmentDashboard() {
 
                   {!tamilSubject && (
                     <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-xs font-mono uppercase tracking-wider text-red-300">
-                      Tamil subject not found for this department. Create a subject named Tamil first.
+                      {`${languageLabel} subject not found for this department. Create a subject named ${languageLabel} first.`}
                     </div>
                   )}
 
@@ -500,7 +507,7 @@ export default function DepartmentDashboard() {
                       onClick={handleAssignTamilToSelectedClasses}
                       className="px-4 py-2 rounded bg-cyan-600 hover:bg-cyan-500 text-xs font-mono font-bold text-white uppercase tracking-wider"
                     >
-                      Add Tamil To Selected Classes
+                      {`Add ${languageLabel} To Selected Classes`}
                     </button>
                   </div>
                 </div>

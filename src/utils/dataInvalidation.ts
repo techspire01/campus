@@ -5,6 +5,7 @@ export type DataInvalidationScope =
   | 'timetable'
   | 'classes'
   | 'tamil'
+  | 'english'
   | 'subjects'
   | 'staff';
 
