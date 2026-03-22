@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Department, Staff } from '../types';
 import { Plus, Trash2, Edit2, Check, X } from 'lucide-react';
 import { clsx } from 'clsx';
@@ -11,6 +11,8 @@ export default function StaffManagement() {
   const [newStaff, setNewStaff] = useState({ name: '', role: 'Staff', dept_id: '', max_workload: 18 });
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editData, setEditData] = useState({ name: '', role: 'Staff', dept_id: '', max_workload: 18 });
+  const [departmentFilter, setDepartmentFilter] = useState<string>('all');
+  const [roleFilter, setRoleFilter] = useState<'combined' | 'Staff' | 'HOD'>('combined');
 
   useEffect(() => {
     loadData();
@@ -121,6 +123,15 @@ export default function StaffManagement() {
     }
   };
 
+  const filteredStaff = useMemo(() => {
+    return staff.filter(member => {
+      const departmentMatch =
+        departmentFilter === 'all' || member.dept_id === Number(departmentFilter);
+      const roleMatch = roleFilter === 'combined' || member.role === roleFilter;
+      return departmentMatch && roleMatch;
+    });
+  }, [staff, departmentFilter, roleFilter]);
+
   return (
     <div className="space-y-8">
       <header className="border-b border-[#1e2d47] pb-6">
@@ -195,15 +206,40 @@ export default function StaffManagement() {
       <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl overflow-hidden">
         <div className="bg-[#141c2e] px-6 py-4 border-b border-[#1e2d47] flex items-center gap-3">
           <div className="w-8 h-8 rounded-full bg-emerald-500/20 flex items-center justify-center">
-            <span className="text-emerald-400 font-bold text-sm">{staff.length}</span>
+            <span className="text-emerald-400 font-bold text-sm">{filteredStaff.length}</span>
           </div>
           <h2 className="font-mono font-bold text-white uppercase tracking-wider">Staff Directory</h2>
+        </div>
+        <div className="px-6 py-4 border-b border-[#1e2d47] bg-[#0c1320]">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <select
+              className="bg-[#0a0e17] border border-[#1e2d47] rounded p-3 text-sm outline-none focus:border-cyan-500/50"
+              value={departmentFilter}
+              onChange={e => setDepartmentFilter(e.target.value)}
+            >
+              <option value="all">All Departments</option>
+              {depts.map(d => (
+                <option key={d.id} value={d.id}>{d.name}</option>
+              ))}
+            </select>
+            <select
+              className="bg-[#0a0e17] border border-[#1e2d47] rounded p-3 text-sm outline-none focus:border-cyan-500/50"
+              value={roleFilter}
+              onChange={e => setRoleFilter(e.target.value as 'combined' | 'Staff' | 'HOD')}
+            >
+              <option value="combined">Combined (Regular + HOD)</option>
+              <option value="Staff">Regular Staff</option>
+              <option value="HOD">HOD</option>
+            </select>
+          </div>
         </div>
         <div className="divide-y divide-[#1e2d47] max-h-96 overflow-y-auto">
           {staff.length === 0 ? (
             <div className="p-6 text-center text-slate-500 font-mono text-sm">No staff members added yet</div>
+          ) : filteredStaff.length === 0 ? (
+            <div className="p-6 text-center text-slate-500 font-mono text-sm">No staff members match the selected filters</div>
           ) : (
-            staff.map(s => (
+            filteredStaff.map(s => (
               <div key={s.id} className="p-4 bg-[#0f1623] hover:bg-[#141c2e] transition-colors">
                 {editingId === s.id ? (
                   /* Edit Mode */
