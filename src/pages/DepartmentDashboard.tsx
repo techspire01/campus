@@ -188,11 +188,12 @@ export default function DepartmentDashboard() {
   const isEnglishDepartment = normalizedDeptName === 'english';
   const isMathematicsDepartment = normalizedDeptName === 'mathematics';
   const isLanguageDepartment = isTamilDepartment || isEnglishDepartment;
+  const isMultiSubjectDepartment = !isLanguageDepartment;
   const activeLanguage = isEnglishDepartment ? 'english' : 'tamil';
   const languageLabel = isEnglishDepartment ? 'English' : 'Tamil';
   const languageScope = isEnglishDepartment ? 'english' : 'tamil';
   const isTamilAssignView = isLanguageDepartment && activeTamilView === 'assign';
-  const isMathAssignView = isMathematicsDepartment && activeMathView === 'assign';
+  const isMathAssignView = isMultiSubjectDepartment && activeMathView === 'assign';
 
   const tamilSubject = subjects.find(subject => {
     if (subject.dept_id !== deptId) return false;
@@ -436,7 +437,25 @@ export default function DepartmentDashboard() {
     }
 
     try {
-      const scheduleRes = await fetch('/api/mathematics/schedule', {
+      if (isMathematicsDepartment) {
+        const scheduleRes = await fetch('/api/mathematics/schedule', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ assignments }),
+        });
+        const scheduleData = await scheduleRes.json();
+
+        if (!scheduleRes.ok) {
+          setStatus({ type: 'error', msg: scheduleData.error || 'Failed to schedule Mathematics' });
+          return;
+        }
+
+        setStatus({ type: 'success', msg: 'Mathematics schedule generated. Redirecting to preview...' });
+        setTimeout(() => navigate(`/mathematics/preview/${scheduleData.sessionId}`), 1000);
+        return;
+      }
+
+      const scheduleRes = await fetch(`/api/departments/${deptId}/schedule-subjects`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ assignments }),
@@ -444,12 +463,12 @@ export default function DepartmentDashboard() {
       const scheduleData = await scheduleRes.json();
 
       if (!scheduleRes.ok) {
-        setStatus({ type: 'error', msg: scheduleData.error || 'Failed to schedule Mathematics' });
+        setStatus({ type: 'error', msg: scheduleData.error || 'Failed to schedule department subjects' });
         return;
       }
 
-      setStatus({ type: 'success', msg: 'Mathematics schedule generated. Redirecting to preview...' });
-      setTimeout(() => navigate(`/mathematics/preview/${scheduleData.sessionId}`), 1000);
+      setStatus({ type: 'success', msg: 'Schedule generated. Redirecting to preview...' });
+      setTimeout(() => navigate(`/department/${deptId}/preview/${scheduleData.sessionId}`), 1000);
     } catch (err: any) {
       setStatus({ type: 'error', msg: err.message });
     }
@@ -475,17 +494,17 @@ export default function DepartmentDashboard() {
         </div>
       </header>
 
-      {(isLanguageDepartment || isMathematicsDepartment) && (
+      {(isLanguageDepartment || isMultiSubjectDepartment) && (
         <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl p-4">
           <div className="text-[10px] font-mono text-cyan-500 uppercase tracking-[0.2em] mb-3">
-            {isMathematicsDepartment ? 'Mathematics Department Options' : `${languageLabel} Department Options`}
+            {isLanguageDepartment ? `${languageLabel} Department Options` : `${dept.name} Department Options`}
           </div>
           <div className="flex gap-2 flex-wrap">
             <button
-              onClick={() => isMathematicsDepartment ? setActiveMathView('staff') : setActiveTamilView('staff')}
+              onClick={() => isLanguageDepartment ? setActiveTamilView('staff') : setActiveMathView('staff')}
               className={clsx(
                 'px-4 py-2 rounded text-xs font-mono uppercase tracking-wider border transition-colors',
-                (isMathematicsDepartment ? activeMathView : activeTamilView) === 'staff'
+                (isLanguageDepartment ? activeTamilView : activeMathView) === 'staff'
                   ? 'bg-cyan-600 border-cyan-500 text-white'
                   : 'bg-[#141c2e] border-[#1e2d47] text-slate-300 hover:border-cyan-500/40'
               )}
@@ -493,15 +512,15 @@ export default function DepartmentDashboard() {
               Manage Staff & Workload
             </button>
             <button
-              onClick={() => isMathematicsDepartment ? setActiveMathView('assign') : setActiveTamilView('assign')}
+              onClick={() => isLanguageDepartment ? setActiveTamilView('assign') : setActiveMathView('assign')}
               className={clsx(
                 'px-4 py-2 rounded text-xs font-mono uppercase tracking-wider border transition-colors',
-                (isMathematicsDepartment ? activeMathView : activeTamilView) === 'assign'
+                (isLanguageDepartment ? activeTamilView : activeMathView) === 'assign'
                   ? 'bg-cyan-600 border-cyan-500 text-white'
                   : 'bg-[#141c2e] border-[#1e2d47] text-slate-300 hover:border-cyan-500/40'
               )}
             >
-              {isMathematicsDepartment ? 'Select Classes & Add Subjects' : `Select Classes & Add ${languageLabel}`}
+              {isLanguageDepartment ? `Select Classes & Add ${languageLabel}` : 'Select Classes & Add Subjects'}
             </button>
           </div>
         </section>
@@ -514,7 +533,7 @@ export default function DepartmentDashboard() {
               <div className="flex items-center gap-3">
                 <GraduationCap className="text-cyan-400" size={20} />
                 <h2 className="font-mono font-bold text-white uppercase tracking-wider">
-                  {isTamilAssignView ? `${languageLabel} Class Allocation` : isMathAssignView ? 'Mathematics Class Allocation' : 'Academic Classes'}
+                  {isTamilAssignView ? `${languageLabel} Class Allocation` : isMathAssignView ? `${dept.name} Class Allocation` : 'Academic Classes'}
                 </h2>
               </div>
             </div>
@@ -743,7 +762,9 @@ export default function DepartmentDashboard() {
                   </div>
 
                   <div className="rounded-lg border border-[#1e2d47] bg-[#141c2e] p-4">
-                    <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 mb-3">Mathematics Subjects</div>
+                    <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 mb-3">
+                      {isMathematicsDepartment ? 'Mathematics Subjects' : `${dept.name} Subjects`}
+                    </div>
                     {mathSubjects.length === 0 ? (
                       <div className="text-sm text-slate-500">No subjects found for this department.</div>
                     ) : (
@@ -814,7 +835,11 @@ export default function DepartmentDashboard() {
                     </div>
                     <div className="divide-y divide-[#1e2d47]">
                       {mathAssignmentRows.length === 0 ? (
-                        <div className="px-4 py-4 text-sm text-slate-500">Select classes and subjects to build mathematics assignments.</div>
+                        <div className="px-4 py-4 text-sm text-slate-500">
+                          {isMathematicsDepartment
+                            ? 'Select classes and subjects to build mathematics assignments.'
+                            : 'Select classes and subjects to build bulk assignments.'}
+                        </div>
                       ) : (
                         mathAssignmentRows.map(row => (
                           <div key={row.key} className="grid grid-cols-4 items-center bg-[#0f1623]">
@@ -859,7 +884,7 @@ export default function DepartmentDashboard() {
                       onClick={handleAssignMathToSelectedClasses}
                       className="px-4 py-2 rounded bg-cyan-600 hover:bg-cyan-500 text-xs font-mono font-bold text-white uppercase tracking-wider"
                     >
-                      Add Mathematics Subjects To Selected Classes
+                      {isMathematicsDepartment ? 'Add Mathematics Subjects To Selected Classes' : 'Assign Subjects To Selected Classes'}
                     </button>
                   </div>
                 </div>
