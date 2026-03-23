@@ -33,6 +33,14 @@ export default function DepartmentDashboard() {
   const [defaultTamilHours, setDefaultTamilHours] = useState<string>('1');
   const [hoursByTamilClass, setHoursByTamilClass] = useState<Record<number, string>>({});
   const [staffByTamilClass, setStaffByTamilClass] = useState<Record<number, string>>({});
+  const [activeMathView, setActiveMathView] = useState<'staff' | 'assign'>('staff');
+  const [selectedMathClassIds, setSelectedMathClassIds] = useState<number[]>([]);
+  const [mathClassFilterYear, setMathClassFilterYear] = useState<string>('all');
+  const [mathClassFilterDeptId, setMathClassFilterDeptId] = useState<string>('all');
+  const [selectedMathSubjectIds, setSelectedMathSubjectIds] = useState<number[]>([]);
+  const [defaultMathHours, setDefaultMathHours] = useState<string>('1');
+  const [hoursByMathAssignment, setHoursByMathAssignment] = useState<Record<string, string>>({});
+  const [staffByMathAssignment, setStaffByMathAssignment] = useState<Record<string, string>>({});
 
   const loadStaff = useCallback(() => {
     fetch('/api/staff', {
@@ -82,6 +90,7 @@ export default function DepartmentDashboard() {
         scopes.includes('staff_workload') ||
         scopes.includes('tamil') ||
         scopes.includes('english') ||
+        scopes.includes('mathematics') ||
         scopes.includes('classes') ||
         scopes.includes('timetable') ||
         scopes.includes('staff')
@@ -117,6 +126,14 @@ export default function DepartmentDashboard() {
     setTamilClassFilterDeptId('all');
     setDefaultTamilHours('1');
     setActiveTamilView('staff');
+    setSelectedMathClassIds([]);
+    setMathClassFilterYear('all');
+    setMathClassFilterDeptId('all');
+    setSelectedMathSubjectIds([]);
+    setDefaultMathHours('1');
+    setHoursByMathAssignment({});
+    setStaffByMathAssignment({});
+    setActiveMathView('staff');
   }, [deptId]);
 
   const handleAddClass = async () => {
@@ -169,11 +186,13 @@ export default function DepartmentDashboard() {
   const normalizedDeptName = dept.name.trim().toLowerCase();
   const isTamilDepartment = dept.name.trim().toLowerCase() === 'tamil';
   const isEnglishDepartment = normalizedDeptName === 'english';
+  const isMathematicsDepartment = normalizedDeptName === 'mathematics';
   const isLanguageDepartment = isTamilDepartment || isEnglishDepartment;
   const activeLanguage = isEnglishDepartment ? 'english' : 'tamil';
   const languageLabel = isEnglishDepartment ? 'English' : 'Tamil';
   const languageScope = isEnglishDepartment ? 'english' : 'tamil';
   const isTamilAssignView = isLanguageDepartment && activeTamilView === 'assign';
+  const isMathAssignView = isMathematicsDepartment && activeMathView === 'assign';
 
   const tamilSubject = subjects.find(subject => {
     if (subject.dept_id !== deptId) return false;
@@ -188,6 +207,27 @@ export default function DepartmentDashboard() {
   });
 
   const selectedTamilClasses = allClasses.filter(item => selectedTamilClassIds.includes(item.id));
+  const mathSubjects = subjects
+    .filter(subject => subject.dept_id === deptId)
+    .sort((a, b) => `${a.code} ${a.name}`.localeCompare(`${b.code} ${b.name}`));
+  const filteredMathClasses = allClasses.filter(item => {
+    const departmentMatch = mathClassFilterDeptId === 'all' || item.dept_id === Number(mathClassFilterDeptId);
+    const yearMatch = mathClassFilterYear === 'all' || item.year === Number(mathClassFilterYear);
+    return departmentMatch && yearMatch;
+  });
+  const selectedMathClasses = allClasses.filter(item => selectedMathClassIds.includes(item.id));
+  const mathAssignmentRows = selectedMathClasses.flatMap(item =>
+    selectedMathSubjectIds
+      .map(subjectId => mathSubjects.find(subject => subject.id === subjectId))
+      .filter((subject): subject is Subject => !!subject)
+      .map(subject => ({
+        key: `${item.id}:${subject.id}`,
+        classId: item.id,
+        className: item.name,
+        subjectId: subject.id,
+        subjectLabel: `${subject.code} - ${subject.name}`,
+      }))
+  );
 
   const getPendingTamilHoursForStaff = (staffId: number) => {
     return selectedTamilClassIds.reduce((total, classId) => {
@@ -205,6 +245,24 @@ export default function DepartmentDashboard() {
     if (!selected) return null;
     const current = selected.current_workload || 0;
     const pending = getPendingTamilHoursForStaff(selected.id);
+    return `${current + pending}h / ${selected.max_workload}h`;
+  };
+
+  const getPendingMathHoursForStaff = (staffId: number) => {
+    return Object.entries(staffByMathAssignment).reduce((total, [assignmentKey, assignedStaffId]) => {
+      if (Number(assignedStaffId || 0) !== staffId) return total;
+      const parsedHours = parseInt(hoursByMathAssignment[assignmentKey] ?? '0', 10);
+      if (Number.isNaN(parsedHours) || parsedHours <= 0) return total;
+      return total + parsedHours;
+    }, 0);
+  };
+
+  const getMathStaffWorkload = (staffId: string) => {
+    if (!staffId) return null;
+    const selected = departmentStaff.find(member => member.id === Number(staffId));
+    if (!selected) return null;
+    const current = selected.current_workload || 0;
+    const pending = getPendingMathHoursForStaff(selected.id);
     return `${current + pending}h / ${selected.max_workload}h`;
   };
 
@@ -288,6 +346,115 @@ export default function DepartmentDashboard() {
     }
   };
 
+  const removeMathAssignmentKeysForClass = (classId: number) => {
+    setHoursByMathAssignment(current => {
+      const next = { ...current };
+      Object.keys(next).forEach(key => {
+        if (key.startsWith(`${classId}:`)) delete next[key];
+      });
+      return next;
+    });
+    setStaffByMathAssignment(current => {
+      const next = { ...current };
+      Object.keys(next).forEach(key => {
+        if (key.startsWith(`${classId}:`)) delete next[key];
+      });
+      return next;
+    });
+  };
+
+  const handleMathClassToggle = (classId: number) => {
+    setSelectedMathClassIds(current => {
+      if (current.includes(classId)) {
+        removeMathAssignmentKeysForClass(classId);
+        return current.filter(id => id !== classId);
+      }
+
+      selectedMathSubjectIds.forEach(subjectId => {
+        const assignmentKey = `${classId}:${subjectId}`;
+        setHoursByMathAssignment(hours => ({ ...hours, [assignmentKey]: hours[assignmentKey] ?? defaultMathHours }));
+        setStaffByMathAssignment(staffMap => ({ ...staffMap, [assignmentKey]: staffMap[assignmentKey] ?? '' }));
+      });
+      return [...current, classId];
+    });
+  };
+
+  const handleMathSubjectToggle = (subjectId: number) => {
+    setSelectedMathSubjectIds(current => {
+      const exists = current.includes(subjectId);
+      if (exists) {
+        setHoursByMathAssignment(hours => {
+          const next = { ...hours };
+          Object.keys(next).forEach(key => {
+            if (key.endsWith(`:${subjectId}`)) delete next[key];
+          });
+          return next;
+        });
+        setStaffByMathAssignment(staffMap => {
+          const next = { ...staffMap };
+          Object.keys(next).forEach(key => {
+            if (key.endsWith(`:${subjectId}`)) delete next[key];
+          });
+          return next;
+        });
+        return current.filter(id => id !== subjectId);
+      }
+
+      selectedMathClassIds.forEach(classId => {
+        const assignmentKey = `${classId}:${subjectId}`;
+        setHoursByMathAssignment(hours => ({ ...hours, [assignmentKey]: hours[assignmentKey] ?? defaultMathHours }));
+        setStaffByMathAssignment(staffMap => ({ ...staffMap, [assignmentKey]: staffMap[assignmentKey] ?? '' }));
+      });
+      return [...current, subjectId];
+    });
+  };
+
+  const handleAssignMathToSelectedClasses = async () => {
+    setStatus(null);
+
+    if (selectedMathClassIds.length === 0) {
+      setStatus({ type: 'error', msg: 'Select at least one class to add Mathematics subjects.' });
+      return;
+    }
+
+    if (selectedMathSubjectIds.length === 0) {
+      setStatus({ type: 'error', msg: 'Select at least one Mathematics subject.' });
+      return;
+    }
+
+    const assignments = mathAssignmentRows.map(row => ({
+      class_id: row.classId,
+      subject_id: row.subjectId,
+      staff_id: staffByMathAssignment[row.key] ? Number(staffByMathAssignment[row.key]) : null,
+      hours_per_week: parseInt(hoursByMathAssignment[row.key] ?? '0', 10),
+    }));
+
+    const invalidAssignment = assignments.find(item => Number.isNaN(item.hours_per_week) || item.hours_per_week <= 0);
+    if (invalidAssignment) {
+      setStatus({ type: 'error', msg: 'Hours/week must be greater than 0 for every selected class-subject row.' });
+      return;
+    }
+
+    try {
+      const scheduleRes = await fetch('/api/mathematics/schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assignments }),
+      });
+      const scheduleData = await scheduleRes.json();
+
+      if (!scheduleRes.ok) {
+        setStatus({ type: 'error', msg: scheduleData.error || 'Failed to schedule Mathematics' });
+        return;
+      }
+
+      setStatus({ type: 'success', msg: 'Mathematics schedule generated. Redirecting to preview...' });
+      setTimeout(() => navigate(`/mathematics/preview/${scheduleData.sessionId}`), 1000);
+    } catch (err: any) {
+      setStatus({ type: 'error', msg: err.message });
+    }
+  };
+
   return (
     <div className="space-y-12">
       <header className="flex justify-between items-end border-b border-[#1e2d47] pb-6">
@@ -308,15 +475,17 @@ export default function DepartmentDashboard() {
         </div>
       </header>
 
-      {isLanguageDepartment && (
+      {(isLanguageDepartment || isMathematicsDepartment) && (
         <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl p-4">
-          <div className="text-[10px] font-mono text-cyan-500 uppercase tracking-[0.2em] mb-3">{languageLabel} Department Options</div>
+          <div className="text-[10px] font-mono text-cyan-500 uppercase tracking-[0.2em] mb-3">
+            {isMathematicsDepartment ? 'Mathematics Department Options' : `${languageLabel} Department Options`}
+          </div>
           <div className="flex gap-2 flex-wrap">
             <button
-              onClick={() => setActiveTamilView('staff')}
+              onClick={() => isMathematicsDepartment ? setActiveMathView('staff') : setActiveTamilView('staff')}
               className={clsx(
                 'px-4 py-2 rounded text-xs font-mono uppercase tracking-wider border transition-colors',
-                activeTamilView === 'staff'
+                (isMathematicsDepartment ? activeMathView : activeTamilView) === 'staff'
                   ? 'bg-cyan-600 border-cyan-500 text-white'
                   : 'bg-[#141c2e] border-[#1e2d47] text-slate-300 hover:border-cyan-500/40'
               )}
@@ -324,28 +493,28 @@ export default function DepartmentDashboard() {
               Manage Staff & Workload
             </button>
             <button
-              onClick={() => setActiveTamilView('assign')}
+              onClick={() => isMathematicsDepartment ? setActiveMathView('assign') : setActiveTamilView('assign')}
               className={clsx(
                 'px-4 py-2 rounded text-xs font-mono uppercase tracking-wider border transition-colors',
-                activeTamilView === 'assign'
+                (isMathematicsDepartment ? activeMathView : activeTamilView) === 'assign'
                   ? 'bg-cyan-600 border-cyan-500 text-white'
                   : 'bg-[#141c2e] border-[#1e2d47] text-slate-300 hover:border-cyan-500/40'
               )}
             >
-              {`Select Classes & Add ${languageLabel}`}
+              {isMathematicsDepartment ? 'Select Classes & Add Subjects' : `Select Classes & Add ${languageLabel}`}
             </button>
           </div>
         </section>
       )}
 
-      <div className={clsx('grid grid-cols-1 gap-8', !isTamilAssignView && 'lg:grid-cols-3')}>
-        <div className={clsx('space-y-6', !isTamilAssignView && 'lg:col-span-2')}>
+      <div className={clsx('grid grid-cols-1 gap-8', !isTamilAssignView && !isMathAssignView && 'lg:grid-cols-3')}>
+        <div className={clsx('space-y-6', !isTamilAssignView && !isMathAssignView && 'lg:col-span-2')}>
           <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl overflow-hidden">
             <div className="bg-[#141c2e] px-6 py-4 border-b border-[#1e2d47] flex justify-between items-center">
               <div className="flex items-center gap-3">
                 <GraduationCap className="text-cyan-400" size={20} />
                 <h2 className="font-mono font-bold text-white uppercase tracking-wider">
-                  {isTamilAssignView ? `${languageLabel} Class Allocation` : 'Academic Classes'}
+                  {isTamilAssignView ? `${languageLabel} Class Allocation` : isMathAssignView ? 'Mathematics Class Allocation' : 'Academic Classes'}
                 </h2>
               </div>
             </div>
@@ -511,6 +680,189 @@ export default function DepartmentDashboard() {
                     </button>
                   </div>
                 </div>
+              ) : isMathAssignView ? (
+                <div className="space-y-6">
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                    <div>
+                      <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 mb-1">Filter by Department</div>
+                      <select
+                        className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                        value={mathClassFilterDeptId}
+                        onChange={e => setMathClassFilterDeptId(e.target.value)}
+                      >
+                        <option value="all">All Departments</option>
+                        {departments.map(item => (
+                          <option key={item.id} value={item.id}>{item.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 mb-1">Filter by Year</div>
+                      <select
+                        className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                        value={mathClassFilterYear}
+                        onChange={e => setMathClassFilterYear(e.target.value)}
+                      >
+                        <option value="all">All Years</option>
+                        <option value="1">Year 1</option>
+                        <option value="2">Year 2</option>
+                        <option value="3">Year 3</option>
+                      </select>
+                    </div>
+                    <div>
+                      <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 mb-1">Default Hours / Week</div>
+                      <input
+                        type="number"
+                        min={1}
+                        className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                        value={defaultMathHours}
+                        onChange={e => setDefaultMathHours(e.target.value)}
+                      />
+                    </div>
+                    <div className="flex items-end">
+                      <button
+                        onClick={() => {
+                          setSelectedMathClassIds(current => {
+                            const idSet = new Set(current);
+                            filteredMathClasses.forEach(item => idSet.add(item.id));
+                            return Array.from(idSet);
+                          });
+                          filteredMathClasses.forEach(item => {
+                            selectedMathSubjectIds.forEach(subjectId => {
+                              const key = `${item.id}:${subjectId}`;
+                              setHoursByMathAssignment(current => ({ ...current, [key]: current[key] ?? defaultMathHours }));
+                              setStaffByMathAssignment(current => ({ ...current, [key]: current[key] ?? '' }));
+                            });
+                          });
+                        }}
+                        className="w-full px-4 py-2 rounded bg-[#141c2e] border border-[#1e2d47] text-xs font-mono uppercase tracking-wider text-slate-300 hover:border-cyan-500/40"
+                      >
+                        Add Filtered Classes
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-[#1e2d47] bg-[#141c2e] p-4">
+                    <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500 mb-3">Mathematics Subjects</div>
+                    {mathSubjects.length === 0 ? (
+                      <div className="text-sm text-slate-500">No subjects found for this department.</div>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-48 overflow-y-auto">
+                        {mathSubjects.map(subject => {
+                          const checked = selectedMathSubjectIds.includes(subject.id);
+                          return (
+                            <label
+                              key={subject.id}
+                              className={clsx(
+                                'rounded-lg border p-3 cursor-pointer',
+                                checked ? 'border-cyan-500/40 bg-cyan-500/10' : 'border-[#1e2d47] bg-[#0f1623]'
+                              )}
+                            >
+                              <div className="flex items-start gap-2">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => handleMathSubjectToggle(subject.id)}
+                                  className="mt-1"
+                                />
+                                <div>
+                                  <div className="font-semibold text-white text-sm">{subject.code}</div>
+                                  <div className="text-[10px] font-mono text-slate-500">{subject.name}</div>
+                                </div>
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="max-h-56 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {filteredMathClasses.map(item => {
+                      const checked = selectedMathClassIds.includes(item.id);
+                      return (
+                        <label
+                          key={item.id}
+                          className={clsx(
+                            'rounded-lg border p-3 cursor-pointer',
+                            checked ? 'border-cyan-500/40 bg-cyan-500/10' : 'border-[#1e2d47] bg-[#141c2e]'
+                          )}
+                        >
+                          <div className="flex items-start gap-2">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => handleMathClassToggle(item.id)}
+                              className="mt-1"
+                            />
+                            <div>
+                              <div className="font-semibold text-white text-sm">{item.name}</div>
+                              <div className="text-[10px] font-mono text-slate-500">{item.dept_name} • Year {item.year}</div>
+                            </div>
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+
+                  <div className="rounded-lg border border-[#1e2d47] overflow-hidden">
+                    <div className="grid grid-cols-4 bg-[#141c2e] border-b border-[#1e2d47] text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                      <div className="px-4 py-3">Class</div>
+                      <div className="px-4 py-3">Subject</div>
+                      <div className="px-4 py-3">Staff</div>
+                      <div className="px-4 py-3">Hours / Week</div>
+                    </div>
+                    <div className="divide-y divide-[#1e2d47]">
+                      {mathAssignmentRows.length === 0 ? (
+                        <div className="px-4 py-4 text-sm text-slate-500">Select classes and subjects to build mathematics assignments.</div>
+                      ) : (
+                        mathAssignmentRows.map(row => (
+                          <div key={row.key} className="grid grid-cols-4 items-center bg-[#0f1623]">
+                            <div className="px-4 py-3 text-sm text-white">{row.className}</div>
+                            <div className="px-4 py-3 text-sm text-white">{row.subjectLabel}</div>
+                            <div className="px-4 py-2">
+                              <div className="flex items-center gap-2">
+                                <select
+                                  className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                                  value={staffByMathAssignment[row.key] ?? ''}
+                                  onChange={e => setStaffByMathAssignment(current => ({ ...current, [row.key]: e.target.value }))}
+                                >
+                                  <option value="">Not assigned</option>
+                                  {departmentStaff.map(member => (
+                                    <option key={member.id} value={member.id}>{member.name}</option>
+                                  ))}
+                                </select>
+                                {staffByMathAssignment[row.key] && (
+                                  <div className="whitespace-nowrap rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-mono text-emerald-300">
+                                    {getMathStaffWorkload(staffByMathAssignment[row.key])}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                            <div className="px-4 py-2">
+                              <input
+                                type="number"
+                                min={1}
+                                className="w-full bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
+                                value={hoursByMathAssignment[row.key] ?? defaultMathHours}
+                                onChange={e => setHoursByMathAssignment(current => ({ ...current, [row.key]: e.target.value }))}
+                              />
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end">
+                    <button
+                      onClick={handleAssignMathToSelectedClasses}
+                      className="px-4 py-2 rounded bg-cyan-600 hover:bg-cyan-500 text-xs font-mono font-bold text-white uppercase tracking-wider"
+                    >
+                      Add Mathematics Subjects To Selected Classes
+                    </button>
+                  </div>
+                </div>
               ) : isClassCreationDisabled ? (
                 <div className="mb-6 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-4 flex items-center gap-3">
                   <Lock className="text-amber-500" size={20} />
@@ -568,7 +920,7 @@ export default function DepartmentDashboard() {
                 </div>
               )}
 
-              {!isTamilAssignView && (
+              {!isTamilAssignView && !isMathAssignView && (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {classes.map(item => (
                   <div key={item.id} className="p-4 bg-[#141c2e] border border-[#1e2d47] rounded-lg transition-all hover:border-cyan-500/50">
@@ -646,7 +998,7 @@ export default function DepartmentDashboard() {
           </section>
         </div>
 
-        {!isTamilAssignView && (
+        {!isTamilAssignView && !isMathAssignView && (
         <div className="space-y-6">
           <section className="bg-[#0f1623] border border-[#1e2d47] rounded-xl overflow-hidden">
             <div className="bg-[#141c2e] px-6 py-4 border-b border-[#1e2d47] flex items-center gap-3">

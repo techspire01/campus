@@ -151,6 +151,19 @@ async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (session_id, class_id, day_order, period)
     );
+
+    CREATE TABLE IF NOT EXISTS cg_mathematics_preview_slots (
+      id SERIAL PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      class_id INTEGER NOT NULL REFERENCES cg_classes(id) ON DELETE CASCADE,
+      subject_id INTEGER NOT NULL REFERENCES cg_subjects(id) ON DELETE CASCADE,
+      staff_id INTEGER REFERENCES cg_staff(id) ON DELETE SET NULL,
+      day_order INTEGER NOT NULL,
+      period INTEGER NOT NULL,
+      hours_per_week INTEGER NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (session_id, class_id, day_order, period)
+    );
   `);
 
   await pool.query(`
@@ -935,6 +948,32 @@ interface EnglishSchedulerResponse {
   error?: string;
 }
 
+interface MathematicsSchedulerRequest {
+  assignments: Array<{
+    class_id: number;
+    class_name?: string;
+    subject_id: number;
+    subject_name?: string;
+    staff_id: number | null;
+    hours_per_week: number;
+  }>;
+  days: number[];
+  periods_per_day: number;
+  occupied_slots: Record<string, Array<{ day_order: number; period: number }>>;
+  occupied_staff_slots: Record<string, Array<{ day_order: number; period: number }>>;
+}
+
+interface MathematicsSchedulerResponse {
+  scheduled_slots?: Array<{
+    class_id: number;
+    subject_id: number;
+    day_order: number;
+    period: number;
+    staff_id: number | null;
+  }>;
+  error?: string;
+}
+
 function runTamilScheduler(payload: TamilSchedulerRequest): Promise<TamilSchedulerResponse> {
   return new Promise((resolve, reject) => {
     const configuredPython = process.env.PYTHON_PATH;
@@ -1031,6 +1070,58 @@ function runEnglishScheduler(payload: EnglishSchedulerRequest): Promise<EnglishS
         resolve(parsed);
       } catch (parseErr) {
         reject(new Error(`Invalid English scheduler JSON output: ${stdout.substring(0, 200)}`));
+      }
+    });
+
+    python.stdin.write(JSON.stringify(payload));
+    python.stdin.end();
+  });
+}
+
+function runMathematicsScheduler(payload: MathematicsSchedulerRequest): Promise<MathematicsSchedulerResponse> {
+  return new Promise((resolve, reject) => {
+    const configuredPython = process.env.PYTHON_PATH;
+    const workspaceVenvWindows = path.join(process.cwd(), '.venv', 'Scripts', 'python.exe');
+    const workspaceVenvUnix = path.join(process.cwd(), '.venv', 'bin', 'python');
+    const pythonBinary = configuredPython
+      || (fs.existsSync(workspaceVenvWindows) ? workspaceVenvWindows : '')
+      || (fs.existsSync(workspaceVenvUnix) ? workspaceVenvUnix : '')
+      || 'python';
+    const scriptPath = path.join(process.cwd(), 'scheduler', 'mathematics_scheduler.py');
+    const python = spawn(pythonBinary, [scriptPath]);
+
+    let stdout = '';
+    let stderr = '';
+
+    python.stdout.on('data', (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+
+    python.stderr.on('data', (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+
+    python.on('error', (err: any) => {
+      reject(new Error(`Mathematics scheduler process error: ${err.message}`));
+    });
+
+    python.on('close', code => {
+      if (code !== 0) {
+        reject(new Error(`Mathematics scheduler failed with code ${code}: ${stderr || stdout || 'No output'}`));
+        return;
+      }
+
+      if (!stdout || stdout.trim() === '') {
+        reject(new Error('Mathematics scheduler produced no output'));
+        return;
+      }
+
+      try {
+        const trimmed = stdout.trim();
+        const parsed = JSON.parse(trimmed) as MathematicsSchedulerResponse;
+        resolve(parsed);
+      } catch {
+        reject(new Error(`Invalid Mathematics scheduler JSON output: ${stdout.substring(0, 200)}`));
       }
     });
 
@@ -4362,6 +4453,539 @@ async function startServer() {
     } catch (e: any) {
       console.error('English regeneration error:', e);
       res.status(500).json({ error: e.message || 'English regeneration failed' });
+    }
+  });
+
+  // Mathematics Scheduling Endpoints
+  app.post('/api/mathematics/schedule', async (req, res) => {
+    try {
+      const { assignments } = req.body;
+
+      if (!Array.isArray(assignments) || assignments.length === 0) {
+        return res.status(400).json({ error: 'Invalid or empty assignments' });
+      }
+
+      const normalizedAssignments = assignments.map((item: any) => ({
+        class_id: Number(item?.class_id),
+        subject_id: Number(item?.subject_id),
+        staff_id: item?.staff_id ? Number(item.staff_id) : null,
+        hours_per_week: Number(item?.hours_per_week),
+      }));
+
+      const invalidAssignment = normalizedAssignments.find(item =>
+        !Number.isFinite(item.class_id)
+        || item.class_id <= 0
+        || !Number.isFinite(item.subject_id)
+        || item.subject_id <= 0
+        || !Number.isFinite(item.hours_per_week)
+        || item.hours_per_week <= 0
+      );
+      if (invalidAssignment) {
+        return res.status(400).json({ error: 'Every mathematics assignment needs valid class, subject, and hours.' });
+      }
+
+      const selectedClassIds = [...new Set(normalizedAssignments.map(item => item.class_id))];
+      const selectedSubjectIds = [...new Set(normalizedAssignments.map(item => item.subject_id))];
+
+      const [classRows, subjectRows, settingsRows] = await Promise.all([
+        pool.query(
+          `SELECT id, dept_id, year, name FROM cg_classes WHERE id = ANY($1::int[])`,
+          [selectedClassIds]
+        ),
+        pool.query(
+          `SELECT id, name, dept_id FROM cg_subjects WHERE id = ANY($1::int[])`,
+          [selectedSubjectIds]
+        ),
+        pool.query('SELECT key, value FROM cg_settings'),
+      ]);
+
+      const classMap = new Map<number, { id: number; dept_id: number; year: number; name: string }>();
+      for (const row of classRows.rows as Array<{ id: number; dept_id: number; year: number; name: string }>) {
+        classMap.set(Number(row.id), row);
+      }
+
+      const subjectMap = new Map<number, { id: number; name: string; dept_id: number | null }>();
+      for (const row of subjectRows.rows as Array<{ id: number; name: string; dept_id: number | null }>) {
+        subjectMap.set(Number(row.id), row);
+      }
+
+      if (classMap.size !== selectedClassIds.length) {
+        return res.status(400).json({ error: 'One or more selected classes were not found.' });
+      }
+      if (subjectMap.size !== selectedSubjectIds.length) {
+        return res.status(400).json({ error: 'One or more selected mathematics subjects were not found.' });
+      }
+
+      const periodsPerDay = Math.max(1, Number(
+        settingsRows.rows.reduce((acc: Record<string, string>, row: any) => {
+          acc[row.key] = row.value;
+          return acc;
+        }, {}).periods_per_day || 6
+      ));
+
+      const occupiedRows = await pool.query(
+        `SELECT class_id, day_order, period FROM cg_timetable_slots WHERE class_id = ANY($1::int[])`,
+        [selectedClassIds]
+      );
+      const occupied: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const classId of selectedClassIds) {
+        occupied[String(classId)] = [];
+      }
+      for (const row of occupiedRows.rows as any[]) {
+        occupied[String(row.class_id)].push({ day_order: Number(row.day_order), period: Number(row.period) });
+      }
+
+      const assignedStaffIds = [...new Set(
+        normalizedAssignments
+          .map(item => item.staff_id ? Number(item.staff_id) : 0)
+          .filter(value => Number.isFinite(value) && value > 0)
+      )];
+      const occupiedStaff: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const staffId of assignedStaffIds) {
+        occupiedStaff[String(staffId)] = [];
+      }
+      if (assignedStaffIds.length > 0) {
+        const staffOccupiedRows = await pool.query(
+          `SELECT staff_id, day_order, period
+           FROM cg_timetable_slots
+           WHERE staff_id = ANY($1::int[])`,
+          [assignedStaffIds]
+        );
+        for (const row of staffOccupiedRows.rows as any[]) {
+          if (!row.staff_id) continue;
+          occupiedStaff[String(row.staff_id)] ??= [];
+          occupiedStaff[String(row.staff_id)].push({ day_order: Number(row.day_order), period: Number(row.period) });
+        }
+      }
+
+      const schedulerAssignments = normalizedAssignments.map(item => ({
+        class_id: item.class_id,
+        class_name: classMap.get(item.class_id)?.name,
+        subject_id: item.subject_id,
+        subject_name: subjectMap.get(item.subject_id)?.name,
+        staff_id: item.staff_id,
+        hours_per_week: item.hours_per_week,
+      }));
+
+      const schedule = await runMathematicsScheduler({
+        assignments: schedulerAssignments,
+        days: [1, 2, 3, 4, 5, 6],
+        periods_per_day: periodsPerDay,
+        occupied_slots: occupied,
+        occupied_staff_slots: occupiedStaff,
+      });
+
+      if (schedule.error) {
+        return res.status(400).json({ error: schedule.error });
+      }
+      if (!schedule.scheduled_slots || !Array.isArray(schedule.scheduled_slots) || schedule.scheduled_slots.length === 0) {
+        return res.status(400).json({ error: 'No available slots found for mathematics scheduling' });
+      }
+
+      const assignmentMeta = new Map<string, { staff_id: number | null; hours_per_week: number }>();
+      for (const item of normalizedAssignments) {
+        assignmentMeta.set(`${item.class_id}-${item.subject_id}`, {
+          staff_id: item.staff_id,
+          hours_per_week: item.hours_per_week,
+        });
+      }
+
+      const sessionId = `mathematics_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+      await pool.query('DELETE FROM cg_mathematics_preview_slots WHERE session_id = $1', [sessionId]);
+
+      for (const slot of schedule.scheduled_slots) {
+        const meta = assignmentMeta.get(`${Number(slot.class_id)}-${Number(slot.subject_id)}`);
+        await pool.query(
+          `INSERT INTO cg_mathematics_preview_slots (session_id, class_id, subject_id, staff_id, day_order, period, hours_per_week)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            sessionId,
+            Number(slot.class_id),
+            Number(slot.subject_id),
+            meta?.staff_id ?? (slot.staff_id ? Number(slot.staff_id) : null),
+            Number(slot.day_order),
+            Number(slot.period),
+            meta?.hours_per_week ?? 1,
+          ]
+        );
+      }
+
+      res.json({ sessionId, slots: schedule.scheduled_slots, slotCount: schedule.scheduled_slots.length });
+    } catch (e: any) {
+      console.error('Mathematics scheduling error:', e);
+      res.status(500).json({ error: e.message || 'Mathematics scheduling failed' });
+    }
+  });
+
+  app.get('/api/mathematics/preview/:sessionId', async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+      const previewRows = await pool.query(
+        `SELECT p.id, p.session_id, p.class_id, c.name AS class_name, c.year, d.name AS dept_name,
+                p.subject_id, subj.name AS subject_name, subj.code AS subject_code,
+                p.staff_id, st.name AS staff_name, p.day_order, p.period, p.hours_per_week
+         FROM cg_mathematics_preview_slots p
+         JOIN cg_classes c ON c.id = p.class_id
+         JOIN cg_subjects subj ON subj.id = p.subject_id
+         LEFT JOIN cg_departments d ON d.id = c.dept_id
+         LEFT JOIN cg_staff st ON st.id = p.staff_id
+         WHERE p.session_id = $1
+         ORDER BY p.class_id, p.subject_id, p.day_order, p.period`,
+        [sessionId]
+      );
+
+      const classIds = [...new Set((previewRows.rows as any[]).map(row => Number(row.class_id)).filter(Boolean))];
+      let timetableRows: any[] = [];
+      let staffBusyRows: any[] = [];
+
+      if (classIds.length > 0) {
+        const timetableResult = await pool.query(
+          `SELECT ts.id, ts.class_id, c.name AS class_name, c.year, d.name AS dept_name, ts.subject_id, s.name AS subject_name, s.code AS subject_code,
+                  ts.staff_id, st.name AS staff_name, l.name AS lab_name, ts.day_order, ts.period, ts.type
+           FROM cg_timetable_slots ts
+           JOIN cg_classes c ON c.id = ts.class_id
+           LEFT JOIN cg_departments d ON d.id = c.dept_id
+           LEFT JOIN cg_subjects s ON s.id = ts.subject_id
+           LEFT JOIN cg_staff st ON st.id = ts.staff_id
+           LEFT JOIN cg_labs l ON l.id = ts.lab_id
+           WHERE ts.class_id = ANY($1::int[])
+           ORDER BY ts.class_id, ts.day_order, ts.period`,
+          [classIds]
+        );
+        timetableRows = timetableResult.rows;
+
+        const previewStaffIds = [...new Set(
+          (previewRows.rows as any[])
+            .map(row => Number(row.staff_id))
+            .filter(value => Number.isFinite(value) && value > 0)
+        )];
+        if (previewStaffIds.length > 0) {
+          const staffBusyResult = await pool.query(
+            `SELECT staff_id, class_id, day_order, period
+             FROM cg_timetable_slots
+             WHERE staff_id = ANY($1::int[])`,
+            [previewStaffIds]
+          );
+          const classSubjectStaffPairs = new Map<string, number>();
+          for (const row of previewRows.rows as any[]) {
+            if (row.staff_id) {
+              classSubjectStaffPairs.set(`${Number(row.class_id)}-${Number(row.subject_id)}`, Number(row.staff_id));
+            }
+          }
+          for (const [pairKey, staffId] of classSubjectStaffPairs.entries()) {
+            const classId = Number(pairKey.split('-')[0]);
+            for (const row of staffBusyResult.rows as any[]) {
+              if (Number(row.staff_id) !== staffId) continue;
+              if (Number(row.class_id) === classId) continue;
+              staffBusyRows.push({
+                class_id: classId,
+                staff_id: staffId,
+                day_order: Number(row.day_order),
+                period: Number(row.period),
+              });
+            }
+          }
+        }
+      }
+
+      res.json({ previewSlots: previewRows.rows, timetableSlots: timetableRows, staffBusySlots: staffBusyRows });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/mathematics/fix/:sessionId', async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+
+      await inTransaction(async client => {
+        const previewRows = await client.query(
+          `SELECT class_id, subject_id, staff_id, day_order, period, hours_per_week
+           FROM cg_mathematics_preview_slots
+           WHERE session_id = $1`,
+          [sessionId]
+        );
+
+        if ((previewRows.rowCount ?? 0) === 0) {
+          throw new Error('Preview session not found.');
+        }
+
+        const existingPreview = previewRows.rows as Array<{
+          class_id: number;
+          subject_id: number;
+          staff_id: number | null;
+          day_order: number;
+          period: number;
+          hours_per_week: number;
+        }>;
+
+        const assignmentMeta = new Map<string, { staff_id: number | null; hours_per_week: number; count: number }>();
+        for (const row of existingPreview) {
+          const key = `${Number(row.class_id)}-${Number(row.subject_id)}`;
+          const current = assignmentMeta.get(key);
+          if (current) {
+            current.count += 1;
+          } else {
+            assignmentMeta.set(key, {
+              staff_id: row.staff_id ? Number(row.staff_id) : null,
+              hours_per_week: Number(row.hours_per_week || 1),
+              count: 1,
+            });
+          }
+        }
+
+        const requestedPreviewSlots = Array.isArray(req.body?.previewSlots) ? req.body.previewSlots : null;
+        const finalPreviewRows = requestedPreviewSlots
+          ? requestedPreviewSlots.map((slot: any) => {
+              const classId = Number(slot?.class_id);
+              const subjectId = Number(slot?.subject_id);
+              const dayOrder = Number(slot?.day_order);
+              const period = Number(slot?.period);
+              const meta = assignmentMeta.get(`${classId}-${subjectId}`);
+              if (!classId || !subjectId || !dayOrder || !period || !meta) {
+                throw new Error('Invalid edited Mathematics preview slots.');
+              }
+              return {
+                class_id: classId,
+                subject_id: subjectId,
+                staff_id: meta.staff_id,
+                day_order: dayOrder,
+                period,
+                hours_per_week: meta.hours_per_week,
+              };
+            })
+          : existingPreview;
+
+        const finalCounts = new Map<string, number>();
+        const previewKeys = new Set<string>();
+        for (const row of finalPreviewRows) {
+          const key = `${row.class_id}-${row.day_order}-${row.period}`;
+          if (previewKeys.has(key)) {
+            throw new Error(`Duplicate Mathematics preview slot at Day ${row.day_order} Period ${row.period} for class ${row.class_id}.`);
+          }
+          previewKeys.add(key);
+          const assignmentKey = `${row.class_id}-${row.subject_id}`;
+          finalCounts.set(assignmentKey, (finalCounts.get(assignmentKey) || 0) + 1);
+        }
+
+        for (const [assignmentKey, meta] of assignmentMeta.entries()) {
+          if ((finalCounts.get(assignmentKey) || 0) !== meta.count) {
+            throw new Error('Mathematics preview slot count mismatch. Refresh the preview and try again.');
+          }
+        }
+
+        const selectedClassIds = [...new Set(finalPreviewRows.map(row => Number(row.class_id)))];
+        const occupiedRows = await client.query(
+          `SELECT class_id, day_order, period
+           FROM cg_timetable_slots
+           WHERE class_id = ANY($1::int[])`,
+          [selectedClassIds]
+        );
+
+        const occupiedKeys = new Set(
+          (occupiedRows.rows as Array<{ class_id: number; day_order: number; period: number }>).map(
+            row => `${row.class_id}-${row.day_order}-${row.period}`
+          )
+        );
+
+        const staffIds = [...new Set(
+          finalPreviewRows
+            .map(row => row.staff_id ? Number(row.staff_id) : 0)
+            .filter(value => value > 0)
+        )];
+        const staffOccupiedKeys = new Set<string>();
+        if (staffIds.length > 0) {
+          const staffOccupiedRows = await client.query(
+            `SELECT staff_id, class_id, day_order, period
+             FROM cg_timetable_slots
+             WHERE staff_id = ANY($1::int[])`,
+            [staffIds]
+          );
+          for (const row of staffOccupiedRows.rows as Array<{ staff_id: number; class_id: number; day_order: number; period: number }>) {
+            staffOccupiedKeys.add(`${row.staff_id}-${row.day_order}-${row.period}`);
+          }
+        }
+
+        const previewStaffKeys = new Set<string>();
+        for (const row of finalPreviewRows) {
+          const key = `${row.class_id}-${row.day_order}-${row.period}`;
+          if (occupiedKeys.has(key)) {
+            throw new Error(`Mathematics slot conflicts with an occupied timetable slot at Day ${row.day_order} Period ${row.period} for class ${row.class_id}.`);
+          }
+          if (row.staff_id) {
+            const staffKey = `${row.staff_id}-${row.day_order}-${row.period}`;
+            if (staffOccupiedKeys.has(staffKey)) {
+              throw new Error(`Mathematics slot conflicts with the assigned staff timetable at Day ${row.day_order} Period ${row.period} for staff ${row.staff_id}.`);
+            }
+            if (previewStaffKeys.has(staffKey)) {
+              throw new Error(`Mathematics preview creates a staff overlap at Day ${row.day_order} Period ${row.period} for staff ${row.staff_id}.`);
+            }
+            previewStaffKeys.add(staffKey);
+          }
+        }
+
+        for (const row of finalPreviewRows) {
+          await client.query(
+            `INSERT INTO cg_timetable_slots (class_id, subject_id, staff_id, day_order, period, type)
+             VALUES ($1, $2, $3, $4, $5, 'mathematics')
+             ON CONFLICT (class_id, day_order, period) DO UPDATE
+             SET subject_id = EXCLUDED.subject_id, staff_id = EXCLUDED.staff_id, type = EXCLUDED.type`,
+            [row.class_id, row.subject_id, row.staff_id, row.day_order, row.period]
+          );
+        }
+
+        await client.query('DELETE FROM cg_mathematics_preview_slots WHERE session_id = $1', [sessionId]);
+      });
+
+      res.json({ success: true, message: 'Mathematics slots finalized' });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/mathematics/regenerate/:sessionId', async (req, res) => {
+    try {
+      const { sessionId } = req.params;
+      const previewRows = await pool.query(
+        `SELECT class_id, subject_id, staff_id, day_order, period, hours_per_week
+         FROM cg_mathematics_preview_slots
+         WHERE session_id = $1`,
+        [sessionId]
+      );
+
+      if (previewRows.rows.length === 0) {
+        return res.status(404).json({ error: 'Preview session not found' });
+      }
+
+      const existingPreview = previewRows.rows as Array<{
+        class_id: number;
+        subject_id: number;
+        staff_id: number | null;
+        hours_per_week: number;
+      }>;
+      const selectedClassIds = [...new Set(existingPreview.map(row => Number(row.class_id)))];
+      const selectedSubjectIds = [...new Set(existingPreview.map(row => Number(row.subject_id)))];
+
+      const [classRows, subjectRows, settingsRows] = await Promise.all([
+        pool.query(
+          `SELECT id, dept_id, year, name FROM cg_classes WHERE id = ANY($1::int[])`,
+          [selectedClassIds]
+        ),
+        pool.query(
+          `SELECT id, name FROM cg_subjects WHERE id = ANY($1::int[])`,
+          [selectedSubjectIds]
+        ),
+        pool.query('SELECT key, value FROM cg_settings'),
+      ]);
+
+      const classMap = new Map<number, { id: number; dept_id: number; year: number; name: string }>();
+      for (const row of classRows.rows as Array<{ id: number; dept_id: number; year: number; name: string }>) {
+        classMap.set(Number(row.id), row);
+      }
+      const subjectMap = new Map<number, { id: number; name: string }>();
+      for (const row of subjectRows.rows as Array<{ id: number; name: string }>) {
+        subjectMap.set(Number(row.id), row);
+      }
+
+      const settings = settingsRows.rows.reduce((acc: Record<string, string>, row: any) => {
+        acc[row.key] = row.value;
+        return acc;
+      }, {});
+      const periodsPerDay = Math.max(1, Number(settings.periods_per_day || 6));
+
+      const collapsedAssignments = new Map<string, { class_id: number; subject_id: number; staff_id: number | null; hours_per_week: number }>();
+      for (const row of existingPreview) {
+        const key = `${Number(row.class_id)}-${Number(row.subject_id)}`;
+        if (!collapsedAssignments.has(key)) {
+          collapsedAssignments.set(key, {
+            class_id: Number(row.class_id),
+            subject_id: Number(row.subject_id),
+            staff_id: row.staff_id ? Number(row.staff_id) : null,
+            hours_per_week: Number(row.hours_per_week || 1),
+          });
+        }
+      }
+
+      const occupiedRows = await pool.query(
+        `SELECT class_id, day_order, period FROM cg_timetable_slots WHERE class_id = ANY($1::int[])`,
+        [selectedClassIds]
+      );
+      const occupied: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const classId of selectedClassIds) {
+        occupied[String(classId)] = [];
+      }
+      for (const row of occupiedRows.rows as any[]) {
+        occupied[String(row.class_id)].push({ day_order: Number(row.day_order), period: Number(row.period) });
+      }
+
+      const assignedStaffIds = [...new Set(
+        Array.from(collapsedAssignments.values())
+          .map(item => item.staff_id ? Number(item.staff_id) : 0)
+          .filter(value => value > 0)
+      )];
+      const occupiedStaff: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const staffId of assignedStaffIds) {
+        occupiedStaff[String(staffId)] = [];
+      }
+      if (assignedStaffIds.length > 0) {
+        const staffOccupiedRows = await pool.query(
+          `SELECT staff_id, day_order, period
+           FROM cg_timetable_slots
+           WHERE staff_id = ANY($1::int[])`,
+          [assignedStaffIds]
+        );
+        for (const row of staffOccupiedRows.rows as any[]) {
+          if (!row.staff_id) continue;
+          occupiedStaff[String(row.staff_id)] ??= [];
+          occupiedStaff[String(row.staff_id)].push({ day_order: Number(row.day_order), period: Number(row.period) });
+        }
+      }
+
+      const schedule = await runMathematicsScheduler({
+        assignments: Array.from(collapsedAssignments.values()).map(item => ({
+          class_id: item.class_id,
+          class_name: classMap.get(item.class_id)?.name,
+          subject_id: item.subject_id,
+          subject_name: subjectMap.get(item.subject_id)?.name,
+          staff_id: item.staff_id,
+          hours_per_week: item.hours_per_week,
+        })),
+        days: [1, 2, 3, 4, 5, 6],
+        periods_per_day: periodsPerDay,
+        occupied_slots: occupied,
+        occupied_staff_slots: occupiedStaff,
+      });
+
+      if (schedule.error) {
+        return res.status(400).json({ error: schedule.error });
+      }
+      if (!schedule.scheduled_slots || !Array.isArray(schedule.scheduled_slots) || schedule.scheduled_slots.length === 0) {
+        return res.status(400).json({ error: 'No available slots found for mathematics regeneration' });
+      }
+
+      await pool.query('DELETE FROM cg_mathematics_preview_slots WHERE session_id = $1', [sessionId]);
+
+      for (const slot of schedule.scheduled_slots) {
+        const meta = collapsedAssignments.get(`${Number(slot.class_id)}-${Number(slot.subject_id)}`);
+        await pool.query(
+          `INSERT INTO cg_mathematics_preview_slots (session_id, class_id, subject_id, staff_id, day_order, period, hours_per_week)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            sessionId,
+            Number(slot.class_id),
+            Number(slot.subject_id),
+            meta?.staff_id ?? (slot.staff_id ? Number(slot.staff_id) : null),
+            Number(slot.day_order),
+            Number(slot.period),
+            meta?.hours_per_week ?? 1,
+          ]
+        );
+      }
+
+      res.json({ success: true, message: 'Timetable regenerated successfully', slotCount: schedule.scheduled_slots.length });
+    } catch (e: any) {
+      console.error('Mathematics regeneration error:', e);
+      res.status(500).json({ error: e.message || 'Mathematics regeneration failed' });
     }
   });
 

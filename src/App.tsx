@@ -31,6 +31,7 @@ import PlacementManagement from './pages/PlacementManagement';
 import PlacementPreview from './pages/PlacementPreview';
 import TamilPreview from './pages/TamilPreview';
 import EnglishPreview from './pages/EnglishPreview';
+import MathematicsPreview from './pages/MathematicsPreview';
 import GlobalTimetables from './pages/GlobalTimetables';
 import CommonSubjects from './pages/CommonSubjects';
 
@@ -219,6 +220,7 @@ function AppContent() {
             <Route path="/placement/preview/:blockId" element={<PlacementPreview />} />
             <Route path="/tamil/preview/:sessionId" element={<TamilPreview />} />
             <Route path="/english/preview/:sessionId" element={<EnglishPreview />} />
+            <Route path="/mathematics/preview/:sessionId" element={<MathematicsPreview />} />
             <Route path="/timetables" element={<GlobalTimetables />} />
           </Routes>
         </div>

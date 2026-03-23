@@ -6,6 +6,7 @@ export type DataInvalidationScope =
   | 'classes'
   | 'tamil'
   | 'english'
+  | 'mathematics'
   | 'subjects'
   | 'staff';
 
