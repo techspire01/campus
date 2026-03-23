@@ -93,9 +93,11 @@ export default function MathematicsPreview() {
       setIsLoading(true);
       const res = await fetch(`/api/mathematics/preview/${sessionId}`);
       const data = await res.json();
-      setPreviewSlots(Array.isArray(data?.previewSlots) ? data.previewSlots : []);
+      const nextPreviewSlots = Array.isArray(data?.previewSlots) ? data.previewSlots : [];
+      setPreviewSlots(nextPreviewSlots);
       setTimetableSlots(Array.isArray(data?.timetableSlots) ? data.timetableSlots : []);
       setStaffBusySlots(Array.isArray(data?.staffBusySlots) ? data.staffBusySlots : []);
+      setHasChanges(nextPreviewSlots.length > 0);
     } catch (err: any) {
       setStatus({ type: 'error', msg: `Failed to load preview: ${err.message}` });
     } finally {

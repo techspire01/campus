@@ -243,7 +243,7 @@ export default function DepartmentDashboard() {
     if (!staffId) return null;
     const selected = departmentStaff.find(member => member.id === Number(staffId));
     if (!selected) return null;
-    const current = selected.current_workload || 0;
+    const current = Number(selected.current_workload || 0);
     const pending = getPendingTamilHoursForStaff(selected.id);
     return `${current + pending}h / ${selected.max_workload}h`;
   };
@@ -261,7 +261,7 @@ export default function DepartmentDashboard() {
     if (!staffId) return null;
     const selected = departmentStaff.find(member => member.id === Number(staffId));
     if (!selected) return null;
-    const current = selected.current_workload || 0;
+    const current = Number(selected.current_workload || 0);
     const pending = getPendingMathHoursForStaff(selected.id);
     return `${current + pending}h / ${selected.max_workload}h`;
   };
@@ -1014,13 +1014,14 @@ export default function DepartmentDashboard() {
             </div>
             <div className="p-6 space-y-4">
               {departmentStaff.map(member => {
-                const workloadPercent = Math.min(100, ((member.current_workload || 0) / member.max_workload) * 100);
+                const currentWorkload = Number(member.current_workload || 0);
+                const workloadPercent = Math.min(100, (currentWorkload / member.max_workload) * 100);
                 return (
                   <div key={member.id} className="space-y-2">
                     <div className="flex justify-between text-sm">
                       <span className="font-medium text-slate-300">{member.name}</span>
                       <span className="font-mono text-emerald-400 text-xs">
-                        {member.current_workload || 0}h / {member.max_workload}h Max
+                        {currentWorkload}h / {member.max_workload}h Max
                       </span>
                     </div>
                     <div className="h-2 bg-[#0a0e17] rounded-full overflow-hidden border border-[#1e2d47]">
