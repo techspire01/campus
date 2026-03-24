@@ -3,7 +3,7 @@ import { Settings, Department, Staff, Subject } from '../types';
 import { Plus, Trash2, Save, Settings as SettingsIcon, BookOpen, Building2, Calendar, Loader2 } from 'lucide-react';
 
 export default function AdminDashboard() {
-  type SubjectTypeOption = 'core' | 'common' | 'lab' | 'pt' | 'edc';
+  type SubjectTypeOption = 'core' | 'common' | 'lab' | 'pt' | 'edc' | 'library';
 
   const [settings, setSettings] = useState<Settings | null>(null);
   const [depts, setDepts] = useState<Department[]>([]);
@@ -60,18 +60,22 @@ export default function AdminDashboard() {
   };
 
   const handleAddSubject = async () => {
-    const normalizedType = newSubject.type === 'pt' || newSubject.type === 'edc' ? 'common' : newSubject.type;
+    const normalizedType = newSubject.type === 'pt' || newSubject.type === 'edc' || newSubject.type === 'library' ? 'common' : newSubject.type;
     const normalizedName =
       newSubject.type === 'pt' && !newSubject.name.trim()
         ? 'Physical Education'
         : newSubject.type === 'edc' && !newSubject.name.trim()
         ? 'EDC'
+        : newSubject.type === 'library' && !newSubject.name.trim()
+        ? 'Library'
         : newSubject.name;
     const normalizedCode =
       newSubject.type === 'pt' && !newSubject.code.trim()
         ? 'PT'
         : newSubject.type === 'edc' && !newSubject.code.trim()
         ? 'EDC'
+        : newSubject.type === 'library' && !newSubject.code.trim()
+        ? 'LIB'
         : newSubject.code;
 
     const res = await fetch('/api/subjects', {
@@ -264,8 +268,8 @@ export default function AdminDashboard() {
                   setNewSubject(current => ({
                     ...current,
                     type: nextType,
-                    name: nextType === 'pt' && !current.name ? 'Physical Education' : nextType === 'edc' && !current.name ? 'EDC' : current.name,
-                    code: nextType === 'pt' && !current.code ? 'PT' : nextType === 'edc' && !current.code ? 'EDC' : current.code,
+                    name: nextType === 'pt' && !current.name ? 'Physical Education' : nextType === 'edc' && !current.name ? 'EDC' : nextType === 'library' && !current.name ? 'Library' : current.name,
+                    code: nextType === 'pt' && !current.code ? 'PT' : nextType === 'edc' && !current.code ? 'EDC' : nextType === 'library' && !current.code ? 'LIB' : current.code,
                   }));
                 }}
               >
@@ -274,6 +278,7 @@ export default function AdminDashboard() {
                 <option value="lab">Lab</option>
                 <option value="pt">PT</option>
                 <option value="edc">EDC</option>
+                <option value="library">Library</option>
               </select>
               <div className="flex gap-2">
                 <select 

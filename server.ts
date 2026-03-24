@@ -1021,6 +1021,20 @@ interface ClassSchedulerResponse {
     period: number;
     staff_id: number | null;
   }>;
+  auto_adjusted?: boolean;
+  adjustments?: Array<{
+    subject_id: number;
+    subject_name: string;
+    subject_code?: string;
+    staff_id: number | null;
+    from_hours_per_week: number;
+    to_hours_per_week: number;
+    reduced_by: number;
+  }>;
+  adjusted_assignments?: Array<{
+    subject_id: number;
+    hours_per_week: number;
+  }>;
   error?: string;
 }
 
@@ -3022,6 +3036,35 @@ async function startServer() {
     }
   });
 
+  app.get('/api/timetable/library', async (req, res) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT
+          ts.id,
+          ts.class_id,
+          c.name AS class_name,
+          ts.subject_id,
+          s.name AS subject_name,
+          s.code AS subject_code,
+          ts.staff_id,
+          st.name AS staff_name,
+          ts.day_order,
+          ts.period,
+          ts.type
+        FROM cg_timetable_slots ts
+        JOIN cg_classes c ON c.id = ts.class_id
+        LEFT JOIN cg_subjects s ON s.id = ts.subject_id
+        LEFT JOIN cg_staff st ON st.id = ts.staff_id
+        WHERE UPPER(COALESCE(s.code, '')) IN ('LIB', 'LIBRARY')
+           OR UPPER(COALESCE(s.name, '')) = 'LIBRARY'
+        ORDER BY ts.day_order, ts.period, c.name
+      `);
+      res.json(rows);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.get('/api/timetable/:classId', async (req, res) => {
     try {
       const classId = Number(req.params.classId);
@@ -3132,9 +3175,11 @@ async function startServer() {
         ),
         pool.query(
           `SELECT cs.id, cs.class_id, cs.subject_id, cs.staff_id, cs.hours_per_week, cs.is_lab_required,
-                  subj.name AS subject_name, subj.code AS subject_code, subj.type AS subject_type
+                  subj.name AS subject_name, subj.code AS subject_code, subj.type AS subject_type,
+                  st.name AS staff_name
            FROM cg_class_subjects cs
            JOIN cg_subjects subj ON subj.id = cs.subject_id
+           LEFT JOIN cg_staff st ON st.id = cs.staff_id
            WHERE cs.class_id = $1
            ORDER BY subj.code, subj.name`,
           [classId]
@@ -3184,6 +3229,7 @@ async function startServer() {
         subject_name: string;
         subject_code: string;
         subject_type: string;
+        staff_name: string | null;
         staff_id: number | null;
         hours_per_week: number;
         is_lab_required: boolean;
@@ -3195,7 +3241,8 @@ async function startServer() {
           subject_id: Number(row.subject_id),
           subject_name: String(row.subject_name || ''),
           subject_code: String(row.subject_code || ''),
-          subject_type: String(row.subject_type || 'core'),
+          subject_type: row.is_lab_required ? 'lab' : String(row.subject_type || 'core'),
+          staff_name: row.staff_name ? String(row.staff_name) : null,
           staff_id: row.staff_id ? Number(row.staff_id) : null,
           hours_per_week: remainingHours,
           is_lab_required: !!row.is_lab_required,
@@ -3246,6 +3293,65 @@ async function startServer() {
       }
       if (!schedule.scheduled_slots || !Array.isArray(schedule.scheduled_slots) || schedule.scheduled_slots.length === 0) {
         return res.status(400).json({ error: 'No additional unassigned slots are available for this class.' });
+      }
+
+      if (schedule.auto_adjusted) {
+        const subjectMetaById = new Map<number, {
+          subject_name: string;
+          subject_code: string;
+          subject_type: string;
+          staff_id: number | null;
+          staff_name: string | null;
+        }>();
+
+        for (const item of assignments) {
+          subjectMetaById.set(item.subject_id, {
+            subject_name: item.subject_name,
+            subject_code: item.subject_code,
+            subject_type: item.subject_type || (item.is_lab_required ? 'lab' : 'core'),
+            staff_id: item.staff_id,
+            staff_name: item.staff_name || null,
+          });
+        }
+
+        const previewSlots = schedule.scheduled_slots.map((slot, index) => {
+          const meta = subjectMetaById.get(Number(slot.subject_id));
+          return {
+            id: -(index + 1),
+            class_id: classId,
+            day_order: Number(slot.day_order),
+            period: Number(slot.period),
+            subject_id: Number(slot.subject_id),
+            subject_name: meta?.subject_name || `Subject ${slot.subject_id}`,
+            subject_code: meta?.subject_code || `SUB-${slot.subject_id}`,
+            staff_id: meta?.staff_id ?? (slot.staff_id ? Number(slot.staff_id) : null),
+            staff_name: meta?.staff_name || null,
+            lab_id: null,
+            lab_name: null,
+            is_locked: false,
+            type: meta?.subject_type || 'core',
+          };
+        });
+
+        const adjustments = Array.isArray(schedule.adjustments) ? schedule.adjustments : [];
+        const adjustedLines = adjustments.map(item => {
+          const label = item.subject_name || item.subject_code || `Subject ${item.subject_id}`;
+          return `${label}: ${item.from_hours_per_week} -> ${item.to_hours_per_week} hour(s)`;
+        });
+
+        const previewMessage = adjustedLines.length > 0
+          ? `Timetable constraints required automatic hour reduction for: ${adjustedLines.join('; ')}. Review the preview and click Fix Timetable to apply it.`
+          : 'Timetable constraints required automatic hour reduction. Review the preview and click Fix Timetable to apply it.';
+
+        return res.json({
+          success: true,
+          preview: true,
+          slotCount: schedule.scheduled_slots.length,
+          message: previewMessage,
+          preview_slots: previewSlots,
+          adjustments,
+          adjusted_assignments: Array.isArray(schedule.adjusted_assignments) ? schedule.adjusted_assignments : [],
+        });
       }
 
       const assignmentMeta = new Map<number, { staff_id: number | null; type: string | null }>();

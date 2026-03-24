@@ -61,27 +61,73 @@ def build_candidates(class_id, assignments, days, periods_per_day, occupied_slot
 
 def explain_failure(assignments, candidates):
     insufficient = []
-    restricted = []
+    subject_details = []
 
     for index, assignment in enumerate(assignments):
         needed = int(assignment.get("hours_per_week", 0))
         available = len(candidates.get(index, []))
         label = assignment.get("subject_name") or assignment.get("subject_code") or f"subject {assignment.get('subject_id')}"
+        staff_id = assignment.get("staff_id")
+        suffix = f" (staff {staff_id})" if staff_id else ""
         if available < needed:
-            insufficient.append(f"{label}: needs {needed}, only {available} free slot(s)")
-        elif is_pt_subject(assignment):
-            restricted.append(f"{label}: PT can use only periods 4-6")
+            if is_pt_subject(assignment):
+                insufficient.append(f"{label}{suffix}: needs {needed}, only {available} valid slot(s) in periods 4-6")
+            else:
+                insufficient.append(f"{label}{suffix}: needs {needed}, only {available} free slot(s)")
+
+        detail = (
+            f"{label}{suffix}: needs {needed}, has {available} candidate slot(s)"
+            + (" [PT 4-6 only]" if is_pt_subject(assignment) else "")
+        )
+        subject_details.append(detail)
 
     if insufficient:
         return "Insufficient unassigned slots for this class. " + "; ".join(insufficient)
-    if restricted:
-        return "No valid class timetable could be generated. " + "; ".join(restricted)
-    return "No valid class timetable could be generated with the available slots and staff availability."
+    return (
+        "No valid class timetable could be generated with the remaining subjects and staff availability. "
+        + "; ".join(subject_details)
+    )
 
 
-def solve_class_schedule(class_id, assignments, days, periods_per_day, occupied_slots, staff_occupied):
-    class_schedule = build_occupied_map(occupied_slots)
-    staff_schedule = build_staff_occupied_map(staff_occupied)
+def choose_reduction_index(assignments, candidates):
+    best_index = None
+    best_score = None
+
+    for index, assignment in enumerate(assignments):
+        hours = int(assignment.get("hours_per_week", 0))
+        if hours <= 0:
+            continue
+
+        # Prefer reducing the subject with the highest weekly hours first.
+        # Use candidate count and stable index as deterministic tie-breakers.
+        score = (hours, len(candidates.get(index, [])), -index)
+        if best_score is None or score > best_score:
+            best_score = score
+            best_index = index
+
+    return best_index
+
+
+def summarize_adjustments(original_assignments, adjusted_assignments):
+    summary = []
+    for original, adjusted in zip(original_assignments, adjusted_assignments):
+        from_hours = int(original.get("hours_per_week", 0))
+        to_hours = int(adjusted.get("hours_per_week", 0))
+        if to_hours >= from_hours:
+            continue
+        summary.append({
+            "subject_id": int(adjusted.get("subject_id")),
+            "subject_name": adjusted.get("subject_name") or adjusted.get("subject_code") or f"subject {adjusted.get('subject_id')}",
+            "subject_code": adjusted.get("subject_code") or "",
+            "staff_id": int(adjusted.get("staff_id")) if adjusted.get("staff_id") else None,
+            "from_hours_per_week": from_hours,
+            "to_hours_per_week": to_hours,
+            "reduced_by": from_hours - to_hours,
+        })
+    return summary
+
+
+def solve_once(class_id, assignments, days, periods_per_day, class_schedule, staff_schedule):
     candidates = build_candidates(class_id, assignments, days, periods_per_day, class_schedule, staff_schedule)
 
     model = cp_model.CpModel()
@@ -110,14 +156,12 @@ def solve_class_schedule(class_id, assignments, days, periods_per_day, occupied_
     for vars_for_staff_slot in staff_slot_usage.values():
         model.Add(sum(vars_for_staff_slot) <= 1)
 
-    day_load_terms = []
     max_day_load = model.NewIntVar(0, periods_per_day, "max_day_load")
     for day in days:
-      day_vars = [var for (index, slot_day, slot_period), var in variables.items() if slot_day == day]
-      day_load = model.NewIntVar(0, periods_per_day, f"day_load_{day}")
-      model.Add(day_load == sum(day_vars))
-      day_load_terms.append(day_load)
-      model.Add(day_load <= max_day_load)
+        day_vars = [var for (index, slot_day, slot_period), var in variables.items() if slot_day == day]
+        day_load = model.NewIntVar(0, periods_per_day, f"day_load_{day}")
+        model.Add(day_load == sum(day_vars))
+        model.Add(day_load <= max_day_load)
 
     late_penalties = []
     for (index, day, period), var in variables.items():
@@ -131,24 +175,72 @@ def solve_class_schedule(class_id, assignments, days, periods_per_day, occupied_
     solver.parameters.num_search_workers = 8
     status = solver.Solve(model)
 
-    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        return {"error": explain_failure(assignments, candidates)}
-
     scheduled_slots = []
-    for (index, day, period), var in variables.items():
-        if solver.Value(var) != 1:
-            continue
-        assignment = assignments[index]
-        scheduled_slots.append({
-            "class_id": class_id,
-            "subject_id": int(assignment["subject_id"]),
-            "day_order": day,
-            "period": period,
-            "staff_id": int(assignment["staff_id"]) if assignment.get("staff_id") else None,
-        })
+    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        for (index, day, period), var in variables.items():
+            if solver.Value(var) != 1:
+                continue
+            assignment = assignments[index]
+            scheduled_slots.append({
+                "class_id": class_id,
+                "subject_id": int(assignment["subject_id"]),
+                "day_order": day,
+                "period": period,
+                "staff_id": int(assignment["staff_id"]) if assignment.get("staff_id") else None,
+            })
 
-    scheduled_slots.sort(key=lambda item: (item["day_order"], item["period"], item["subject_id"]))
-    return {"scheduled_slots": scheduled_slots}
+        scheduled_slots.sort(key=lambda item: (item["day_order"], item["period"], item["subject_id"]))
+
+    return status, candidates, scheduled_slots
+
+
+def solve_class_schedule(class_id, assignments, days, periods_per_day, occupied_slots, staff_occupied):
+    class_schedule = build_occupied_map(occupied_slots)
+    staff_schedule = build_staff_occupied_map(staff_occupied)
+    original_assignments = [dict(item) for item in assignments]
+    working_assignments = [dict(item) for item in assignments]
+
+    total_hours = sum(max(0, int(item.get("hours_per_week", 0))) for item in working_assignments)
+    max_attempts = max(1, total_hours + 1)
+
+    final_failure_message = "No valid class timetable could be generated."
+
+    for _ in range(max_attempts):
+        status, candidates, scheduled_slots = solve_once(
+            class_id,
+            working_assignments,
+            days,
+            periods_per_day,
+            class_schedule,
+            staff_schedule,
+        )
+
+        if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            adjustments = summarize_adjustments(original_assignments, working_assignments)
+            response = {"scheduled_slots": scheduled_slots}
+            if adjustments:
+                response["auto_adjusted"] = True
+                response["adjustments"] = adjustments
+                response["adjusted_assignments"] = [
+                    {
+                        "subject_id": int(item["subject_id"]),
+                        "hours_per_week": int(item.get("hours_per_week", 0)),
+                    }
+                    for item in working_assignments
+                ]
+            return response
+
+        final_failure_message = explain_failure(working_assignments, candidates)
+        reduction_index = choose_reduction_index(working_assignments, candidates)
+        if reduction_index is None:
+            break
+
+        current_hours = int(working_assignments[reduction_index].get("hours_per_week", 0))
+        if current_hours <= 0:
+            break
+        working_assignments[reduction_index]["hours_per_week"] = current_hours - 1
+
+    return {"error": final_failure_message}
 
 
 if __name__ == "__main__":

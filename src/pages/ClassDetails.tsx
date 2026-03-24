@@ -67,6 +67,7 @@ export default function ClassDetails() {
   const [draftTimetable, setDraftTimetable] = useState<TimetableSlot[]>([]);
   const [draggingSlot, setDraggingSlot] = useState<TimetableSlot | null>(null);
   const [staffTimetableCache, setStaffTimetableCache] = useState<Record<number, TimetableSlot[]>>({});
+  const [preserveGeneratedDraft, setPreserveGeneratedDraft] = useState(false);
 
   const refreshData = () => {
     fetch('/api/classes').then(res => res.json()).then(data => {
@@ -86,8 +87,12 @@ export default function ClassDetails() {
 
   useEffect(() => {
     if (!isEditingTimetable) return;
+    if (preserveGeneratedDraft) {
+      setPreserveGeneratedDraft(false);
+      return;
+    }
     setDraftTimetable(timetable.filter(slot => slot.type !== 'placement'));
-  }, [isEditingTimetable, timetable]);
+  }, [isEditingTimetable, timetable, preserveGeneratedDraft]);
 
   useEffect(() => {
     if (!isEditingTimetable) return;
@@ -456,6 +461,63 @@ export default function ClassDetails() {
         const errorMessage = data.error || 'Unable to generate class timetable.';
         setStatus({ type: 'error', msg: errorMessage });
         window.alert(errorMessage);
+        return;
+      }
+
+      if (data.preview && Array.isArray(data.preview_slots)) {
+        const mergedSlots = [...timetable.filter(slot => slot.type !== 'placement')];
+        const occupied = new Set(mergedSlots.map(slot => `${slot.day_order}-${slot.period}`));
+        const subjectMeta = new Map<number, { subject_name: string; subject_code: string; staff_id: number | null; staff_name?: string; type: string }>(
+          classSubjects.map(subject => [
+            Number(subject.subject_id),
+            {
+              subject_name: subject.subject_name,
+              subject_code: subject.subject_code,
+              staff_id: subject.staff_id ?? null,
+              staff_name: subject.staff_name || undefined,
+              type: subject.is_lab_required ? 'lab' : 'core',
+            },
+          ])
+        );
+
+        let previewId = -1000;
+        for (const slot of data.preview_slots as Array<any>) {
+          const day = Number(slot.day_order);
+          const period = Number(slot.period);
+          const key = `${day}-${period}`;
+          if (occupied.has(key)) continue;
+
+          const subjectId = Number(slot.subject_id);
+          const meta = subjectMeta.get(subjectId);
+          const fallbackStaffName = slot.staff_id
+            ? (allStaff.find(member => member.id === Number(slot.staff_id))?.name || undefined)
+            : undefined;
+
+          mergedSlots.push({
+            id: Number.isFinite(Number(slot.id)) ? Number(slot.id) : previewId--,
+            class_id: Number(id),
+            day_order: day,
+            period,
+            subject_id: subjectId,
+            subject_name: meta?.subject_name || String(slot.subject_name || ''),
+            subject_code: meta?.subject_code || String(slot.subject_code || ''),
+            staff_id: meta?.staff_id ?? (slot.staff_id ? Number(slot.staff_id) : null),
+            staff_name: meta?.staff_name || String(slot.staff_name || fallbackStaffName || ''),
+            lab_id: slot.lab_id ? Number(slot.lab_id) : null,
+            lab_name: slot.lab_name ? String(slot.lab_name) : undefined,
+            is_locked: !!slot.is_locked,
+            type: String(slot.type || meta?.type || 'core'),
+          });
+          occupied.add(key);
+        }
+
+        setPreserveGeneratedDraft(true);
+        setDraftTimetable(mergedSlots);
+        setDraggingSlot(null);
+        setIsEditingTimetable(true);
+        const previewMessage = data.message || 'Generated a preview timetable after adjusting subject hours. Review it and click Fix Timetable to apply.';
+        setStatus({ type: 'success', msg: previewMessage });
+        window.alert(previewMessage);
         return;
       }
 
