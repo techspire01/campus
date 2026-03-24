@@ -8,6 +8,11 @@ import { subscribeDataInvalidation } from '../utils/dataInvalidation';
 // Departments where class creation is disabled
 const RESTRICTED_DEPARTMENTS = ['tamil', 'english', 'mathematics'];
 
+function getDefaultClassFilterDeptId(departmentName: string | undefined, departmentId: number) {
+  const normalizedDepartmentName = departmentName?.trim().toLowerCase() || '';
+  return RESTRICTED_DEPARTMENTS.includes(normalizedDepartmentName) ? 'all' : String(departmentId);
+}
+
 export default function DepartmentDashboard() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -119,22 +124,25 @@ export default function DepartmentDashboard() {
   }, [loadStaff]);
 
   useEffect(() => {
+    if (!dept) return;
+
+    const defaultDeptFilterId = getDefaultClassFilterDeptId(dept.name, deptId);
     setSelectedTamilClassIds([]);
     setHoursByTamilClass({});
     setStaffByTamilClass({});
     setTamilClassFilterYear('all');
-    setTamilClassFilterDeptId('all');
+    setTamilClassFilterDeptId(defaultDeptFilterId);
     setDefaultTamilHours('1');
     setActiveTamilView('staff');
     setSelectedMathClassIds([]);
     setMathClassFilterYear('all');
-    setMathClassFilterDeptId('all');
+    setMathClassFilterDeptId(defaultDeptFilterId);
     setSelectedMathSubjectIds([]);
     setDefaultMathHours('1');
     setHoursByMathAssignment({});
     setStaffByMathAssignment({});
     setActiveMathView('staff');
-  }, [deptId]);
+  }, [dept, deptId]);
 
   const handleAddClass = async () => {
     setStatus(null);
@@ -297,7 +305,7 @@ export default function DepartmentDashboard() {
     }
 
     if (selectedTamilClassIds.length === 0) {
-      setStatus({ type: 'error', msg: `Select at least one class to add ${languageLabel}.` });
+      setStatus({ type: 'error', msg: `Add ${languageLabel} to at least one class.` });
       return;
     }
 
@@ -414,7 +422,7 @@ export default function DepartmentDashboard() {
     setStatus(null);
 
     if (selectedMathClassIds.length === 0) {
-      setStatus({ type: 'error', msg: 'Select at least one class to add Mathematics subjects.' });
+      setStatus({ type: 'error', msg: 'Add Mathematics subjects to at least one class.' });
       return;
     }
 
@@ -520,7 +528,7 @@ export default function DepartmentDashboard() {
                   : 'bg-[#141c2e] border-[#1e2d47] text-slate-300 hover:border-cyan-500/40'
               )}
             >
-              {isLanguageDepartment ? `Select Classes & Add ${languageLabel}` : 'Select Classes & Add Subjects'}
+              {isLanguageDepartment ? `Add ${languageLabel}` : 'Add Subjects'}
             </button>
           </div>
         </section>
@@ -533,7 +541,7 @@ export default function DepartmentDashboard() {
               <div className="flex items-center gap-3">
                 <GraduationCap className="text-cyan-400" size={20} />
                 <h2 className="font-mono font-bold text-white uppercase tracking-wider">
-                  {isTamilAssignView ? `${languageLabel} Class Allocation` : isMathAssignView ? `${dept.name} Class Allocation` : 'Academic Classes'}
+                  {isTamilAssignView ? `${languageLabel} Subject Allocation` : isMathAssignView ? `${dept.name} Subject Allocation` : 'Academic Classes'}
                 </h2>
               </div>
             </div>
@@ -602,7 +610,7 @@ export default function DepartmentDashboard() {
                         }}
                         className="w-full px-4 py-2 rounded bg-[#141c2e] border border-[#1e2d47] text-xs font-mono uppercase tracking-wider text-slate-300 hover:border-cyan-500/40"
                       >
-                        Add Filtered Classes
+                        Use Filtered Classes
                       </button>
                     </div>
                   </div>
@@ -756,7 +764,7 @@ export default function DepartmentDashboard() {
                         }}
                         className="w-full px-4 py-2 rounded bg-[#141c2e] border border-[#1e2d47] text-xs font-mono uppercase tracking-wider text-slate-300 hover:border-cyan-500/40"
                       >
-                        Add Filtered Classes
+                        Use Filtered Classes
                       </button>
                     </div>
                   </div>
@@ -837,8 +845,8 @@ export default function DepartmentDashboard() {
                       {mathAssignmentRows.length === 0 ? (
                         <div className="px-4 py-4 text-sm text-slate-500">
                           {isMathematicsDepartment
-                            ? 'Select classes and subjects to build mathematics assignments.'
-                            : 'Select classes and subjects to build bulk assignments.'}
+                            ? 'Choose classes and subjects to build mathematics assignments.'
+                            : 'Choose classes and subjects to build subject assignments.'}
                         </div>
                       ) : (
                         mathAssignmentRows.map(row => (

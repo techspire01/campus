@@ -261,8 +261,8 @@ export default function DepartmentSubjectPreview() {
             <ArrowLeft size={20} className="text-cyan-400" />
           </button>
           <div>
-            <div className="text-[10px] font-mono text-cyan-500 uppercase tracking-[0.2em]">{schedulerDepartmentName} Timetable Preview</div>
-            <h1 className="text-3xl font-mono font-bold text-white tracking-tighter uppercase">Schedule Review</h1>
+            <div className="text-[10px] font-mono text-cyan-500 uppercase tracking-[0.2em]">{schedulerDepartmentName} Subject Preview</div>
+            <h1 className="text-3xl font-mono font-bold text-white tracking-tighter uppercase">Subject Review</h1>
           </div>
         </div>
         <div className="flex gap-2">

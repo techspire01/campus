@@ -114,6 +114,22 @@ export default function ClassDetails() {
     return exactName ? exactName.id : null;
   };
 
+  const getPendingHoursForStaff = (staffId: number, excludeClassSubjectId?: number) => {
+    return classSubjects.reduce((total, subject) => {
+      if (subject.id === excludeClassSubjectId) return total;
+      if (subject.staff_id !== staffId) return total;
+      return total + Number(subject.hours_per_week || 0);
+    }, 0);
+  };
+
+  const getStaffWorkloadLabel = (staffId: number | null | undefined, pendingHours = 0) => {
+    if (!staffId) return null;
+    const member = allStaff.find(item => item.id === staffId);
+    if (!member) return null;
+    const current = Number(member.current_workload || 0);
+    return `${current + pendingHours}h / ${member.max_workload}h`;
+  };
+
   const handleAddSubject = async () => {
     if (!id) return;
     setStatus(null);
@@ -381,6 +397,13 @@ export default function ClassDetails() {
 
   const periods = Array.from({ length: parseInt(settings.periods_per_day, 10) }, (_, i) => i + 1);
   const days = [1, 2, 3, 4, 5, 6];
+  const editingStaffId = resolveStaffId(editForm.staff_input);
+  const editingStaffWorkload = editingSubjectId && editingStaffId
+    ? getStaffWorkloadLabel(
+        editingStaffId,
+        getPendingHoursForStaff(editingStaffId, editingSubjectId) + Number(editForm.hours_per_week || 0)
+      )
+    : null;
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
@@ -485,93 +508,6 @@ export default function ClassDetails() {
       </section>
 
       <section className="rounded-xl border border-[#1e2d47] bg-[#0f1623] p-5">
-        <h2 className="text-lg font-semibold text-white mb-4">Assigned Subjects ({classSubjects.length})</h2>
-        <div className="space-y-2">
-          {classSubjects.map(cs => (
-            <div key={cs.id} className="rounded-lg border border-[#243550] bg-[#141c2e] p-3">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold text-white">{cs.subject_code} {cs.subject_name}</p>
-                  <p className="text-xs text-slate-400">
-                    {cs.hours_per_week}h/week - {cs.staff_name || 'Unassigned'}
-                  </p>
-                </div>
-                <span className="text-xs px-2 py-1 rounded bg-[#223451] text-slate-200">
-                  {cs.staff_id ? 'Assigned' : 'Unassigned'}
-                </span>
-              </div>
-
-              {editingSubjectId === cs.id ? (
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-2 mt-3">
-                  <input
-                    list="staff-suggestions"
-                    className="md:col-span-2 px-3 py-2 rounded-md border border-[#2a3a57] bg-[#0a0e17] text-sm"
-                    value={editForm.staff_input}
-                    onChange={e => setEditForm({ ...editForm, staff_input: e.target.value })}
-                    placeholder="Assign staff"
-                  />
-                  <input
-                    type="number"
-                    min="1"
-                    className="px-3 py-2 rounded-md border border-[#2a3a57] bg-[#0a0e17] text-sm"
-                    value={editForm.hours_per_week}
-                    onChange={e => setEditForm({ ...editForm, hours_per_week: parseInt(e.target.value, 10) || 1 })}
-                  />
-                  <label className="inline-flex items-center gap-2 text-sm text-slate-300">
-                    <input
-                      type="checkbox"
-                      checked={editForm.is_lab_required}
-                      onChange={e => setEditForm({ ...editForm, is_lab_required: e.target.checked })}
-                    />
-                    Lab
-                  </label>
-                  <div className="md:col-span-4 flex gap-2 justify-end">
-                    <button
-                      onClick={() => setEditingSubjectId(null)}
-                      className="px-3 py-1.5 rounded border border-[#2a3a57] text-xs text-slate-200"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      onClick={() => handleSaveSubjectEdit(cs.id)}
-                      className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white text-xs"
-                    >
-                      Save
-                    </button>
-                    <button
-                      onClick={() => handleUnassignStaff(cs.id)}
-                      className="px-3 py-1.5 rounded border border-[#2a3a57] text-xs text-slate-200"
-                    >
-                      Unassign Staff
-                    </button>
-                    <button
-                      onClick={() => handleUnassignSubject(cs.id)}
-                      className="px-3 py-1.5 rounded bg-red-600 hover:bg-red-700 text-white text-xs"
-                    >
-                      Unassign Subject
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex justify-end mt-3">
-                  <button
-                    onClick={() => startEditing(cs)}
-                    className="px-3 py-1.5 rounded border border-[#2a3a57] text-xs text-slate-200 hover:bg-[#0a0e17]"
-                  >
-                    Edit Assignment
-                  </button>
-                </div>
-              )}
-            </div>
-          ))}
-
-          {classSubjects.length === 0 && (
-            <p className="text-sm text-slate-400">No subjects assigned yet.</p>
-          )}
-        </div>
-      </section>
-
-      <section className="rounded-xl border border-[#1e2d47] bg-[#0f1623] p-5">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <FlaskConical size={18} className="text-cyan-400" />
@@ -667,6 +603,147 @@ export default function ClassDetails() {
         <div className="flex items-center gap-2 mb-4">
           <Clock size={18} className="text-cyan-400" />
           <h2 className="text-lg font-semibold text-white">Weekly Timetable</h2>
+        </div>
+
+        <div className="mb-6 overflow-x-auto rounded-xl border border-[#243550] bg-[#141c2e]">
+          <div className="flex items-center justify-between border-b border-[#243550] px-4 py-3">
+            <h3 className="text-sm font-semibold text-white">Subject Tabulation</h3>
+            <span className="text-xs text-slate-400">{classSubjects.length} assigned subjects</span>
+          </div>
+          <table className="w-full border-collapse">
+            <thead>
+              <tr className="bg-[#101a2b]">
+                <th className="p-3 text-left text-xs text-slate-400 border-b border-[#243550]">Code</th>
+                <th className="p-3 text-left text-xs text-slate-400 border-b border-[#243550]">Subject</th>
+                <th className="p-3 text-center text-xs text-slate-400 border-b border-[#243550]">Hours/Week</th>
+                <th className="p-3 text-left text-xs text-slate-400 border-b border-[#243550]">Staff</th>
+                <th className="p-3 text-center text-xs text-slate-400 border-b border-[#243550]">Type</th>
+                <th className="p-3 text-center text-xs text-slate-400 border-b border-[#243550]">Status</th>
+                <th className="p-3 text-right text-xs text-slate-400 border-b border-[#243550]">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {classSubjects.map(cs => (
+                  <tr key={`tabulation-${cs.id}`} className="border-b border-[#243550] last:border-b-0">
+                    <td className="p-3 text-sm font-semibold text-cyan-300">{cs.subject_code}</td>
+                    <td className="p-3 text-sm text-white">{cs.subject_name}</td>
+                    <td className="p-3 text-center text-sm text-slate-200">
+                      {editingSubjectId === cs.id ? (
+                        <input
+                          type="number"
+                          min="1"
+                          className="w-24 rounded-md border border-[#2a3a57] bg-[#0a0e17] px-2 py-1.5 text-center text-sm text-white"
+                          value={editForm.hours_per_week}
+                          onChange={e => setEditForm({ ...editForm, hours_per_week: parseInt(e.target.value, 10) || 1 })}
+                        />
+                      ) : (
+                        cs.hours_per_week
+                      )}
+                    </td>
+                    <td className="p-3 text-sm text-slate-300">
+                      {editingSubjectId === cs.id ? (
+                        <div className="flex items-center gap-2">
+                          <input
+                            list="staff-suggestions"
+                            className="w-full min-w-[180px] rounded-md border border-[#2a3a57] bg-[#0a0e17] px-3 py-1.5 text-sm text-white"
+                            value={editForm.staff_input}
+                            onChange={e => setEditForm({ ...editForm, staff_input: e.target.value })}
+                            placeholder="Assign staff"
+                          />
+                          {editingStaffWorkload && (
+                            <div className="whitespace-nowrap rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-mono text-emerald-300">
+                              {editingStaffWorkload}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <span>{cs.staff_name || 'Unassigned'}</span>
+                          {cs.staff_id && getStaffWorkloadLabel(cs.staff_id) && (
+                            <div className="whitespace-nowrap rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-mono text-emerald-300">
+                              {getStaffWorkloadLabel(cs.staff_id)}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                    <td className="p-3 text-center">
+                      {editingSubjectId === cs.id ? (
+                        <label className="inline-flex items-center gap-2 text-sm text-slate-300">
+                          <input
+                            type="checkbox"
+                            checked={editForm.is_lab_required}
+                            onChange={e => setEditForm({ ...editForm, is_lab_required: e.target.checked })}
+                          />
+                          Lab
+                        </label>
+                      ) : (
+                        <span className={clsx(
+                          'inline-flex rounded px-2 py-1 text-[11px]',
+                          cs.is_lab_required ? 'bg-cyan-500/15 text-cyan-300' : 'bg-slate-700/50 text-slate-300'
+                        )}>
+                          {cs.is_lab_required ? 'Lab' : 'Theory'}
+                        </span>
+                      )}
+                    </td>
+                    <td className="p-3 text-center">
+                      <span className={clsx(
+                        'inline-flex rounded px-2 py-1 text-[11px]',
+                        cs.staff_id ? 'bg-emerald-500/15 text-emerald-300' : 'bg-[#223451] text-slate-200'
+                      )}>
+                        {cs.staff_id ? 'Assigned' : 'Unassigned'}
+                      </span>
+                    </td>
+                    <td className="p-3">
+                      <div className="flex flex-wrap justify-end gap-2">
+                        {editingSubjectId === cs.id ? (
+                          <>
+                            <button
+                              onClick={() => setEditingSubjectId(null)}
+                              className="px-3 py-1.5 rounded border border-[#2a3a57] text-xs text-slate-200"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={() => handleSaveSubjectEdit(cs.id)}
+                              className="px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white text-xs"
+                            >
+                              Save
+                            </button>
+                            <button
+                              onClick={() => handleUnassignStaff(cs.id)}
+                              className="px-3 py-1.5 rounded border border-[#2a3a57] text-xs text-slate-200"
+                            >
+                              Unassign Staff
+                            </button>
+                            <button
+                              onClick={() => handleUnassignSubject(cs.id)}
+                              className="px-3 py-1.5 rounded bg-red-600 hover:bg-red-700 text-white text-xs"
+                            >
+                              Unassign Subject
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            onClick={() => startEditing(cs)}
+                            className="px-3 py-1.5 rounded border border-[#2a3a57] text-xs text-slate-200 hover:bg-[#0a0e17]"
+                          >
+                            Edit Assignment
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+              ))}
+              {classSubjects.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="p-4 text-center text-sm text-slate-400">
+                    No subjects assigned yet.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
 
         <div className="overflow-x-auto">
