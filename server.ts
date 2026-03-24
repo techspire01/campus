@@ -988,6 +988,33 @@ interface MathematicsSchedulerResponse {
   error?: string;
 }
 
+interface ClassSchedulerRequest {
+  class_id: number;
+  assignments: Array<{
+    subject_id: number;
+    subject_name?: string;
+    subject_code?: string;
+    staff_id: number | null;
+    hours_per_week: number;
+    is_lab_required?: boolean;
+  }>;
+  days: number[];
+  periods_per_day: number;
+  occupied_slots: Record<string, Array<{ day_order: number; period: number }>>;
+  occupied_staff_slots: Record<string, Array<{ day_order: number; period: number }>>;
+}
+
+interface ClassSchedulerResponse {
+  scheduled_slots?: Array<{
+    class_id: number;
+    subject_id: number;
+    day_order: number;
+    period: number;
+    staff_id: number | null;
+  }>;
+  error?: string;
+}
+
 function runTamilScheduler(payload: TamilSchedulerRequest): Promise<TamilSchedulerResponse> {
   return new Promise((resolve, reject) => {
     const configuredPython = process.env.PYTHON_PATH;
@@ -1136,6 +1163,57 @@ function runMathematicsScheduler(payload: MathematicsSchedulerRequest): Promise<
         resolve(parsed);
       } catch {
         reject(new Error(`Invalid Mathematics scheduler JSON output: ${stdout.substring(0, 200)}`));
+      }
+    });
+
+    python.stdin.write(JSON.stringify(payload));
+    python.stdin.end();
+  });
+}
+
+function runClassScheduler(payload: ClassSchedulerRequest): Promise<ClassSchedulerResponse> {
+  return new Promise((resolve, reject) => {
+    const configuredPython = process.env.PYTHON_PATH;
+    const workspaceVenvWindows = path.join(process.cwd(), '.venv', 'Scripts', 'python.exe');
+    const workspaceVenvUnix = path.join(process.cwd(), '.venv', 'bin', 'python');
+    const pythonBinary = configuredPython
+      || (fs.existsSync(workspaceVenvWindows) ? workspaceVenvWindows : '')
+      || (fs.existsSync(workspaceVenvUnix) ? workspaceVenvUnix : '')
+      || 'python';
+    const scriptPath = path.join(process.cwd(), 'scheduler', 'class_scheduler.py');
+    const python = spawn(pythonBinary, [scriptPath]);
+
+    let stdout = '';
+    let stderr = '';
+
+    python.stdout.on('data', (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+
+    python.stderr.on('data', (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+
+    python.on('error', (err: any) => {
+      reject(new Error(`Class scheduler process error: ${err.message}`));
+    });
+
+    python.on('close', code => {
+      if (code !== 0) {
+        reject(new Error(`Class scheduler failed with code ${code}: ${stderr || stdout || 'No output'}`));
+        return;
+      }
+
+      if (!stdout || stdout.trim() === '') {
+        reject(new Error('Class scheduler produced no output'));
+        return;
+      }
+
+      try {
+        const parsed = JSON.parse(stdout.trim()) as ClassSchedulerResponse;
+        resolve(parsed);
+      } catch {
+        reject(new Error(`Invalid Class scheduler JSON output: ${stdout.substring(0, 200)}`));
       }
     });
 
@@ -2936,6 +3014,185 @@ async function startServer() {
       res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/classes/:classId/generate-timetable', async (req, res) => {
+    try {
+      const classId = Number(req.params.classId);
+      if (!Number.isFinite(classId) || classId <= 0) {
+        return res.status(400).json({ error: 'Invalid class id.' });
+      }
+
+      const [classResult, classSubjectsResult, timetableResult, settingsResult] = await Promise.all([
+        pool.query(
+          `SELECT c.id, c.name, c.dept_id, d.name AS dept_name
+           FROM cg_classes c
+           LEFT JOIN cg_departments d ON d.id = c.dept_id
+           WHERE c.id = $1`,
+          [classId]
+        ),
+        pool.query(
+          `SELECT cs.id, cs.class_id, cs.subject_id, cs.staff_id, cs.hours_per_week, cs.is_lab_required,
+                  subj.name AS subject_name, subj.code AS subject_code, subj.type AS subject_type
+           FROM cg_class_subjects cs
+           JOIN cg_subjects subj ON subj.id = cs.subject_id
+           WHERE cs.class_id = $1
+           ORDER BY subj.code, subj.name`,
+          [classId]
+        ),
+        pool.query(
+          `SELECT class_id, subject_id, staff_id, day_order, period
+           FROM cg_timetable_slots
+           WHERE class_id = $1`,
+          [classId]
+        ),
+        pool.query('SELECT key, value FROM cg_settings'),
+      ]);
+
+      if (classResult.rowCount === 0) {
+        return res.status(404).json({ error: 'Class not found.' });
+      }
+
+      if ((classSubjectsResult.rowCount ?? 0) === 0) {
+        return res.status(400).json({ error: 'Assign subjects in the Subject Tabulation before generating the timetable.' });
+      }
+
+      const settingsMap = settingsResult.rows.reduce((acc: Record<string, string>, row: any) => {
+        acc[String(row.key)] = String(row.value);
+        return acc;
+      }, {});
+      const periodsPerDay = Math.max(1, Number(settingsMap.periods_per_day || 6));
+      const days = [1, 2, 3, 4, 5, 6];
+
+      const occupiedSlots: Record<string, Array<{ day_order: number; period: number }>> = {
+        [String(classId)]: [],
+      };
+      const existingSubjectCounts = new Map<number, number>();
+
+      for (const row of timetableResult.rows as Array<{ subject_id: number | null; day_order: number; period: number }>) {
+        occupiedSlots[String(classId)].push({
+          day_order: Number(row.day_order),
+          period: Number(row.period),
+        });
+        if (row.subject_id) {
+          existingSubjectCounts.set(Number(row.subject_id), (existingSubjectCounts.get(Number(row.subject_id)) || 0) + 1);
+        }
+      }
+
+      const assignments = (classSubjectsResult.rows as Array<{
+        id: number;
+        subject_id: number;
+        subject_name: string;
+        subject_code: string;
+        subject_type: string;
+        staff_id: number | null;
+        hours_per_week: number;
+        is_lab_required: boolean;
+      }>).map(row => {
+        const alreadyScheduled = existingSubjectCounts.get(Number(row.subject_id)) || 0;
+        const remainingHours = Math.max(0, Number(row.hours_per_week) - alreadyScheduled);
+        return {
+          class_subject_id: Number(row.id),
+          subject_id: Number(row.subject_id),
+          subject_name: String(row.subject_name || ''),
+          subject_code: String(row.subject_code || ''),
+          subject_type: String(row.subject_type || 'core'),
+          staff_id: row.staff_id ? Number(row.staff_id) : null,
+          hours_per_week: remainingHours,
+          is_lab_required: !!row.is_lab_required,
+        };
+      }).filter(item => item.hours_per_week > 0);
+
+      if (assignments.length === 0) {
+        return res.status(400).json({ error: 'All assigned subjects are already fully scheduled for this class.' });
+      }
+
+      const staffIds = [...new Set(
+        assignments
+          .map(item => item.staff_id || 0)
+          .filter(staffId => Number.isFinite(staffId) && staffId > 0)
+      )];
+      const occupiedStaffSlots: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const staffId of staffIds) {
+        occupiedStaffSlots[String(staffId)] = [];
+      }
+      if (staffIds.length > 0) {
+        const staffResult = await pool.query(
+          `SELECT staff_id, day_order, period
+           FROM cg_timetable_slots
+           WHERE staff_id = ANY($1::int[])`,
+          [staffIds]
+        );
+        for (const row of staffResult.rows as Array<{ staff_id: number | null; day_order: number; period: number }>) {
+          if (!row.staff_id) continue;
+          occupiedStaffSlots[String(row.staff_id)] ??= [];
+          occupiedStaffSlots[String(row.staff_id)].push({
+            day_order: Number(row.day_order),
+            period: Number(row.period),
+          });
+        }
+      }
+
+      const schedule = await runClassScheduler({
+        class_id: classId,
+        assignments,
+        days,
+        periods_per_day: periodsPerDay,
+        occupied_slots: occupiedSlots,
+        occupied_staff_slots: occupiedStaffSlots,
+      });
+
+      if (schedule.error) {
+        return res.status(400).json({ error: schedule.error });
+      }
+      if (!schedule.scheduled_slots || !Array.isArray(schedule.scheduled_slots) || schedule.scheduled_slots.length === 0) {
+        return res.status(400).json({ error: 'No additional unassigned slots are available for this class.' });
+      }
+
+      const assignmentMeta = new Map<number, { staff_id: number | null; type: string | null }>();
+      for (const item of assignments) {
+        assignmentMeta.set(item.subject_id, {
+          staff_id: item.staff_id,
+          type: item.is_lab_required ? 'lab' : item.subject_type || 'core',
+        });
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        for (const slot of schedule.scheduled_slots) {
+          const meta = assignmentMeta.get(Number(slot.subject_id));
+          await client.query(
+            `INSERT INTO cg_timetable_slots (class_id, day_order, period, subject_id, staff_id, lab_id, type, is_locked)
+             VALUES ($1, $2, $3, $4, $5, NULL, $6, false)
+             ON CONFLICT (class_id, day_order, period) DO NOTHING`,
+            [
+              classId,
+              Number(slot.day_order),
+              Number(slot.period),
+              Number(slot.subject_id),
+              meta?.staff_id ?? (slot.staff_id ? Number(slot.staff_id) : null),
+              meta?.type ?? 'core',
+            ]
+          );
+        }
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+
+      res.json({
+        success: true,
+        message: 'Class timetable generated successfully.',
+        slotCount: schedule.scheduled_slots.length,
+      });
+    } catch (e: any) {
+      console.error('Class timetable generation error:', e);
+      res.status(500).json({ error: e.message || 'Class timetable generation failed' });
     }
   });
 

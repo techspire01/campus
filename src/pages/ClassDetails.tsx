@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Clock, FlaskConical, Plus, X, Lock, Send } from 'lucide-react';
+import { ArrowLeft, Clock, FlaskConical, LoaderCircle, Plus, X, Lock, Send } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Class, ClassSubject, LabRequirement, Settings, Staff, Subject, TimetableSlot } from '../types';
 import { emitDataInvalidation } from '../utils/dataInvalidation';
@@ -51,6 +51,7 @@ export default function ClassDetails() {
     hours_per_week: 4,
     is_lab_required: false
   });
+  const [isGeneratingTimetable, setIsGeneratingTimetable] = useState(false);
   const [status, setStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
 
   // Lab requirement request state
@@ -381,6 +382,42 @@ export default function ClassDetails() {
     }
   };
 
+  const handleGenerateClassTimetable = async () => {
+    if (!id) return;
+    setStatus(null);
+    setIsGeneratingTimetable(true);
+
+    try {
+      const res = await fetch(`/api/classes/${id}/generate-timetable`, {
+        method: 'POST',
+      });
+      const raw = await res.text();
+      let data: any = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        data = { error: raw || 'Unable to generate class timetable.' };
+      }
+
+      if (!res.ok) {
+        const errorMessage = data.error || 'Unable to generate class timetable.';
+        setStatus({ type: 'error', msg: errorMessage });
+        window.alert(errorMessage);
+        return;
+      }
+
+      refreshData();
+      emitDataInvalidation(['staff_workload', 'timetable', 'classes'], 'ClassDetails.handleGenerateClassTimetable');
+      setStatus({ type: 'success', msg: data.message || 'Class timetable generated successfully.' });
+    } catch (err: any) {
+      const errorMessage = err.message || 'Unable to generate class timetable.';
+      setStatus({ type: 'error', msg: errorMessage });
+      window.alert(errorMessage);
+    } finally {
+      setIsGeneratingTimetable(false);
+    }
+  };
+
   // Lab subjects from classSubjects with their request status
   const labSubjects = useMemo(() => {
     return classSubjects
@@ -406,7 +443,7 @@ export default function ClassDetails() {
     : null;
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6">
+    <div className="relative max-w-6xl mx-auto space-y-6">
       <button
         onClick={() => navigate(-1)}
         className="inline-flex items-center gap-2 text-sm text-slate-400 hover:text-white transition-colors"
@@ -600,9 +637,23 @@ export default function ClassDetails() {
       </section>
 
       <section className="rounded-xl border border-[#1e2d47] bg-[#0f1623] p-5">
-        <div className="flex items-center gap-2 mb-4">
-          <Clock size={18} className="text-cyan-400" />
-          <h2 className="text-lg font-semibold text-white">Weekly Timetable</h2>
+        <div className="mb-4 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <Clock size={18} className="text-cyan-400" />
+            <h2 className="text-lg font-semibold text-white">Weekly Timetable</h2>
+          </div>
+          <button
+            onClick={handleGenerateClassTimetable}
+            disabled={isGeneratingTimetable || classSubjects.length === 0}
+            className={clsx(
+              'rounded-md px-4 py-2 text-sm font-medium transition-colors',
+              isGeneratingTimetable || classSubjects.length === 0
+                ? 'cursor-not-allowed bg-slate-700 text-slate-400'
+                : 'bg-cyan-600 text-white hover:bg-cyan-500'
+            )}
+          >
+            {isGeneratingTimetable ? 'Generating...' : 'Generate Timetable'}
+          </button>
         </div>
 
         <div className="mb-6 overflow-x-auto rounded-xl border border-[#243550] bg-[#141c2e]">
@@ -938,6 +989,23 @@ export default function ClassDetails() {
               >
                 {labReqLoading ? 'Submitting…' : <><Send size={14} /> Submit Request</>}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isGeneratingTimetable && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border border-cyan-500/20 bg-[#0f1623] px-6 py-8 text-center shadow-2xl">
+            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full border border-cyan-500/20 bg-cyan-500/10">
+              <LoaderCircle size={30} className="animate-spin text-cyan-400" />
+            </div>
+            <h3 className="text-lg font-semibold text-white">Generating class timetable</h3>
+            <p className="mt-2 text-sm text-slate-400">
+              Scheduling subjects into free slots and checking staff conflicts.
+            </p>
+            <div className="mt-5 h-2 overflow-hidden rounded-full border border-cyan-500/20 bg-[#0a0e17]">
+              <div className="h-full w-1/2 animate-pulse rounded-full bg-cyan-500" />
             </div>
           </div>
         </div>
