@@ -226,6 +226,15 @@ async function ensureSchema() {
   `);
 }
 
+async function ensureDefaultSubjects() {
+  await pool.query(
+    `INSERT INTO cg_subjects (name, code, type, dept_id, is_addon)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (code) DO NOTHING`,
+    ['Physical Education', 'PT', 'common', null, false]
+  );
+}
+
 async function inTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
@@ -1228,6 +1237,7 @@ async function startServer() {
   }
 
   await ensureSchema();
+  await ensureDefaultSubjects();
 
   const app = express();
   app.use(express.json());
@@ -1616,12 +1626,31 @@ async function startServer() {
       const updatedStaff = staff_id !== undefined ? (staff_id ? Number(staff_id) : null) : current.staff_id;
       const updatedLab = is_lab_required !== undefined ? !!is_lab_required : current.is_lab_required;
 
-      await pool.query(
-        `UPDATE cg_class_subjects
-         SET staff_id = $1, hours_per_week = $2, is_lab_required = $3
-         WHERE id = $4`,
-        [updatedStaff, updatedHours, updatedLab, classSubjectId]
-      );
+      await inTransaction(async client => {
+        await client.query(
+          `UPDATE cg_class_subjects
+           SET staff_id = $1, hours_per_week = $2, is_lab_required = $3
+           WHERE id = $4`,
+          [updatedStaff, updatedHours, updatedLab, classSubjectId]
+        );
+
+        if (updatedHours < Number(current.hours_per_week)) {
+          const slotsToRemove = Number(current.hours_per_week) - updatedHours;
+          if (slotsToRemove > 0) {
+            await client.query(
+              `DELETE FROM cg_timetable_slots
+               WHERE id IN (
+                 SELECT id
+                 FROM cg_timetable_slots
+                 WHERE class_id = $1 AND subject_id = $2 AND (type IS NULL OR type <> 'placement')
+                 ORDER BY day_order DESC, period DESC
+                 LIMIT $3
+               )`,
+              [classId, Number(current.subject_id), slotsToRemove]
+            );
+          }
+        }
+      });
 
       const updated = await pool.query(`
         SELECT cs.*, s.name AS subject_name, s.code AS subject_code, st.name AS staff_name
@@ -3685,6 +3714,187 @@ async function startServer() {
         );
       });
       res.json({ success: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+
+  app.post('/api/classes/:classId/fix-timetable', async (req, res) => {
+    try {
+      const classId = Number(req.params.classId);
+      const slots = Array.isArray(req.body?.slots) ? req.body.slots : null;
+
+      if (!Number.isFinite(classId) || classId <= 0) {
+        return res.status(400).json({ error: 'Invalid class id.' });
+      }
+      if (!slots) {
+        return res.status(400).json({ error: 'Invalid timetable slots payload.' });
+      }
+
+      const normalizedSlots = slots.map((slot: any) => ({
+        subject_id: Number(slot?.subject_id),
+        staff_id: slot?.staff_id ? Number(slot.staff_id) : null,
+        lab_id: slot?.lab_id ? Number(slot.lab_id) : null,
+        day_order: Number(slot?.day_order),
+        period: Number(slot?.period),
+        type: slot?.type ? String(slot.type) : null,
+        is_locked: !!slot?.is_locked,
+      }));
+
+      const invalidSlot = normalizedSlots.find(slot =>
+        !Number.isFinite(slot.subject_id)
+        || slot.subject_id <= 0
+        || !Number.isFinite(slot.day_order)
+        || slot.day_order <= 0
+        || !Number.isFinite(slot.period)
+        || slot.period <= 0
+      );
+      if (invalidSlot) {
+        return res.status(400).json({ error: 'Each timetable slot needs valid subject, day, and period values.' });
+      }
+
+      const positionKeys = new Set<string>();
+      for (const slot of normalizedSlots) {
+        const key = `${slot.day_order}-${slot.period}`;
+        if (positionKeys.has(key)) {
+          return res.status(400).json({ error: `Duplicate timetable slot at Day ${slot.day_order} Period ${slot.period}.` });
+        }
+        positionKeys.add(key);
+      }
+
+        const subjectIds: number[] = [...new Set<number>(normalizedSlots.map(slot => Number(slot.subject_id)))];
+      const staffIds = [...new Set(normalizedSlots.map(slot => slot.staff_id || 0).filter(id => id > 0))];
+      const labIds = [...new Set(normalizedSlots.map(slot => slot.lab_id || 0).filter(id => id > 0))];
+
+      await inTransaction(async client => {
+        const classResult = await client.query('SELECT id FROM cg_classes WHERE id = $1', [classId]);
+        if (classResult.rowCount === 0) {
+          throw new Error('Class not found.');
+        }
+
+        const classSubjectResult = await client.query(
+          `SELECT subject_id FROM cg_class_subjects WHERE class_id = $1`,
+          [classId]
+        );
+        const allowedSubjectIds = new Set(
+          (classSubjectResult.rows as Array<{ subject_id: number }>).map(row => Number(row.subject_id))
+        );
+        for (const subjectId of subjectIds) {
+          if (!allowedSubjectIds.has(subjectId)) {
+            throw new Error('One or more timetable slots reference a subject that is no longer assigned to this class.');
+          }
+        }
+
+        if (subjectIds.length > 0) {
+          const subjectRows = await client.query(
+            `SELECT id, code, name
+             FROM cg_subjects
+             WHERE id = ANY($1::int[])`,
+            [subjectIds]
+          );
+          const ptSubjectIds = new Set(
+            (subjectRows.rows as Array<{ id: number; code: string | null; name: string | null }>)
+              .filter(row => {
+                const code = String(row.code || '').trim().toLowerCase();
+                const name = String(row.name || '').trim().toLowerCase();
+                return code === 'pt' || code.startsWith('pt ') || name === 'pt' || name.includes('physical education');
+              })
+              .map(row => Number(row.id))
+          );
+
+          for (const slot of normalizedSlots) {
+            if (ptSubjectIds.has(slot.subject_id) && ![4, 5, 6].includes(slot.period)) {
+              throw new Error(`PT can only be scheduled in Periods 4, 5, or 6. Invalid slot: Day ${slot.day_order} Period ${slot.period}.`);
+            }
+          }
+        }
+
+        const protectedRows = await client.query(
+          `SELECT day_order, period
+           FROM cg_timetable_slots
+           WHERE class_id = $1 AND type = 'placement'`,
+          [classId]
+        );
+        const protectedKeys = new Set(
+          (protectedRows.rows as Array<{ day_order: number; period: number }>).map(row => `${row.day_order}-${row.period}`)
+        );
+        for (const slot of normalizedSlots) {
+          const key = `${slot.day_order}-${slot.period}`;
+          if (protectedKeys.has(key)) {
+            throw new Error(`Day ${slot.day_order} Period ${slot.period} is reserved for placement.`);
+          }
+        }
+
+        if (staffIds.length > 0) {
+          const staffBusyRows = await client.query(
+            `SELECT staff_id, day_order, period
+             FROM cg_timetable_slots
+             WHERE staff_id = ANY($1::int[]) AND class_id <> $2`,
+            [staffIds, classId]
+          );
+          const busyKeys = new Set(
+            (staffBusyRows.rows as Array<{ staff_id: number; day_order: number; period: number }>)
+              .map(row => `${row.staff_id}-${row.day_order}-${row.period}`)
+          );
+          const pendingKeys = new Set<string>();
+          for (const slot of normalizedSlots) {
+            if (!slot.staff_id) continue;
+            const key = `${slot.staff_id}-${slot.day_order}-${slot.period}`;
+            if (busyKeys.has(key)) {
+              throw new Error(`Staff conflict at Day ${slot.day_order} Period ${slot.period}.`);
+            }
+            if (pendingKeys.has(key)) {
+              throw new Error(`Duplicate staff allocation at Day ${slot.day_order} Period ${slot.period}.`);
+            }
+            pendingKeys.add(key);
+          }
+        }
+
+        if (labIds.length > 0) {
+          const labBusyRows = await client.query(
+            `SELECT lab_id, day_order, period
+             FROM cg_timetable_slots
+             WHERE lab_id = ANY($1::int[]) AND class_id <> $2`,
+            [labIds, classId]
+          );
+          const busyKeys = new Set(
+            (labBusyRows.rows as Array<{ lab_id: number; day_order: number; period: number }>)
+              .map(row => `${row.lab_id}-${row.day_order}-${row.period}`)
+          );
+          for (const slot of normalizedSlots) {
+            if (!slot.lab_id) continue;
+            const key = `${slot.lab_id}-${slot.day_order}-${slot.period}`;
+            if (busyKeys.has(key)) {
+              throw new Error(`Lab conflict at Day ${slot.day_order} Period ${slot.period}.`);
+            }
+          }
+        }
+
+        await client.query(
+          `DELETE FROM cg_timetable_slots
+           WHERE class_id = $1 AND (type IS NULL OR type <> 'placement')`,
+          [classId]
+        );
+
+        for (const slot of normalizedSlots) {
+          await client.query(
+            `INSERT INTO cg_timetable_slots (class_id, day_order, period, subject_id, staff_id, lab_id, type, is_locked)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [
+              classId,
+              slot.day_order,
+              slot.period,
+              slot.subject_id,
+              slot.staff_id,
+              slot.lab_id,
+              slot.type,
+              slot.is_locked,
+            ]
+          );
+        }
+      });
+
+      res.json({ success: true, message: 'Class timetable updated successfully.' });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }

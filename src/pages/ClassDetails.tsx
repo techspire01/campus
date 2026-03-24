@@ -62,6 +62,11 @@ export default function ClassDetails() {
   const [labReqForm, setLabReqForm] = useState({ requirements: '' });
   const [labReqLoading, setLabReqLoading] = useState(false);
   const [deletingLabReqId, setDeletingLabReqId] = useState<number | null>(null);
+  const [isEditingTimetable, setIsEditingTimetable] = useState(false);
+  const [isFixingTimetable, setIsFixingTimetable] = useState(false);
+  const [draftTimetable, setDraftTimetable] = useState<TimetableSlot[]>([]);
+  const [draggingSlot, setDraggingSlot] = useState<TimetableSlot | null>(null);
+  const [staffTimetableCache, setStaffTimetableCache] = useState<Record<number, TimetableSlot[]>>({});
 
   const refreshData = () => {
     fetch('/api/classes').then(res => res.json()).then(data => {
@@ -78,6 +83,11 @@ export default function ClassDetails() {
   useEffect(() => {
     refreshData();
   }, [id]);
+
+  useEffect(() => {
+    if (!isEditingTimetable) return;
+    setDraftTimetable(timetable.filter(slot => slot.type !== 'placement'));
+  }, [isEditingTimetable, timetable]);
 
   const subjectSuggestionValues = useMemo(
     () => allSubjects.map(subject => `${subject.code} - ${subject.name}`),
@@ -418,6 +428,83 @@ export default function ClassDetails() {
     }
   };
 
+  const isPtSubjectSlot = (slot: Pick<TimetableSlot, 'subject_code' | 'subject_name'>) => {
+    const code = String(slot.subject_code || '').trim().toLowerCase();
+    const name = String(slot.subject_name || '').trim().toLowerCase();
+    return code === 'pt' || code.startsWith('pt ') || name === 'pt' || name.includes('physical education');
+  };
+
+  const getStaffTimetable = async (staffId: number) => {
+    if (staffTimetableCache[staffId]) {
+      return staffTimetableCache[staffId];
+    }
+    const res = await fetch(`/api/timetable/staff/${staffId}`);
+    const data = await res.json();
+    const next = Array.isArray(data) ? data : [];
+    setStaffTimetableCache(current => ({ ...current, [staffId]: next }));
+    return next;
+  };
+
+  const handleStartTimetableEdit = () => {
+    setStatus(null);
+    setDraftTimetable(timetable.filter(slot => slot.type !== 'placement'));
+    setDraggingSlot(null);
+    setIsEditingTimetable(true);
+  };
+
+  const handleCancelTimetableEdit = () => {
+    setDraftTimetable([]);
+    setDraggingSlot(null);
+    setIsEditingTimetable(false);
+  };
+
+  const handleRemoveDraftSlot = (day: number, period: number) => {
+    setDraftTimetable(current =>
+      current.filter(slot => !(slot.day_order === day && slot.period === period))
+    );
+  };
+
+  const handleFixTimetable = async () => {
+    if (!id) return;
+    setStatus(null);
+    setIsFixingTimetable(true);
+
+    try {
+      const res = await fetch(`/api/classes/${id}/fix-timetable`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          slots: draftTimetable.map(slot => ({
+            subject_id: slot.subject_id,
+            staff_id: slot.staff_id,
+            lab_id: slot.lab_id,
+            day_order: slot.day_order,
+            period: slot.period,
+            type: slot.type,
+            is_locked: slot.is_locked,
+          })),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setStatus({ type: 'error', msg: data.error || 'Unable to finalize class timetable.' });
+        window.alert(data.error || 'Unable to finalize class timetable.');
+        return;
+      }
+      refreshData();
+      emitDataInvalidation(['staff_workload', 'timetable', 'classes'], 'ClassDetails.handleFixTimetable');
+      setStatus({ type: 'success', msg: data.message || 'Class timetable updated successfully.' });
+      setIsEditingTimetable(false);
+      setDraggingSlot(null);
+    } catch (err: any) {
+      const errorMessage = err.message || 'Unable to finalize class timetable.';
+      setStatus({ type: 'error', msg: errorMessage });
+      window.alert(errorMessage);
+    } finally {
+      setIsFixingTimetable(false);
+    }
+  };
+
   // Lab subjects from classSubjects with their request status
   const labSubjects = useMemo(() => {
     return classSubjects
@@ -441,6 +528,8 @@ export default function ClassDetails() {
         getPendingHoursForStaff(editingStaffId, editingSubjectId) + Number(editForm.hours_per_week || 0)
       )
     : null;
+  const placementSlots = timetable.filter(slot => slot.type === 'placement');
+  const activeTimetable = isEditingTimetable ? [...placementSlots, ...draftTimetable] : timetable;
 
   return (
     <div className="relative max-w-6xl mx-auto space-y-6">
@@ -642,18 +731,56 @@ export default function ClassDetails() {
             <Clock size={18} className="text-cyan-400" />
             <h2 className="text-lg font-semibold text-white">Weekly Timetable</h2>
           </div>
-          <button
-            onClick={handleGenerateClassTimetable}
-            disabled={isGeneratingTimetable || classSubjects.length === 0}
-            className={clsx(
-              'rounded-md px-4 py-2 text-sm font-medium transition-colors',
-              isGeneratingTimetable || classSubjects.length === 0
-                ? 'cursor-not-allowed bg-slate-700 text-slate-400'
-                : 'bg-cyan-600 text-white hover:bg-cyan-500'
+          <div className="flex flex-wrap items-center gap-2">
+            {isEditingTimetable ? (
+              <>
+                <button
+                  onClick={handleCancelTimetableEdit}
+                  disabled={isFixingTimetable}
+                  className="rounded-md border border-[#2a3a57] px-4 py-2 text-sm text-slate-200 hover:bg-[#141c2e]"
+                >
+                  Cancel Edit
+                </button>
+                <button
+                  onClick={handleFixTimetable}
+                  disabled={isFixingTimetable}
+                  className={clsx(
+                    'rounded-md px-4 py-2 text-sm font-medium transition-colors',
+                    isFixingTimetable
+                      ? 'cursor-not-allowed bg-slate-700 text-slate-400'
+                      : 'bg-emerald-600 text-white hover:bg-emerald-500'
+                  )}
+                >
+                  {isFixingTimetable ? 'Fixing...' : 'Fix Timetable'}
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={handleStartTimetableEdit}
+                disabled={timetable.length === 0}
+                className={clsx(
+                  'rounded-md px-4 py-2 text-sm font-medium transition-colors',
+                  timetable.length === 0
+                    ? 'cursor-not-allowed bg-slate-700 text-slate-400'
+                    : 'bg-[#141c2e] text-white hover:bg-[#1a2740]'
+                )}
+              >
+                Edit Timetable
+              </button>
             )}
-          >
-            {isGeneratingTimetable ? 'Generating...' : 'Generate Timetable'}
-          </button>
+            <button
+              onClick={handleGenerateClassTimetable}
+              disabled={isGeneratingTimetable || isEditingTimetable || classSubjects.length === 0}
+              className={clsx(
+                'rounded-md px-4 py-2 text-sm font-medium transition-colors',
+                isGeneratingTimetable || isEditingTimetable || classSubjects.length === 0
+                  ? 'cursor-not-allowed bg-slate-700 text-slate-400'
+                  : 'bg-cyan-600 text-white hover:bg-cyan-500'
+              )}
+            >
+              {isGeneratingTimetable ? 'Generating...' : 'Generate Timetable'}
+            </button>
+          </div>
         </div>
 
         <div className="mb-6 overflow-x-auto rounded-xl border border-[#243550] bg-[#141c2e]">
@@ -814,19 +941,71 @@ export default function ClassDetails() {
                 <tr key={day}>
                   <td className="p-2 text-sm font-medium text-slate-200 border-b border-[#243550]">Day {day}</td>
                   {periods.map(period => {
-                    const slot = timetable.find(s => s.day_order === day && s.period === period);
+                    const slot = activeTimetable.find(s => s.day_order === day && s.period === period);
 
                     return (
                       <td key={period} className="p-2 border-b border-[#243550]">
                         <div className={clsx(
                           'min-h-[72px] rounded border p-2',
+                          isEditingTimetable && !slot && 'border-cyan-500/30 bg-cyan-500/5',
                           slot ? 'border-[#2d4b6d] bg-[#122034]' : 'border-dashed border-[#2a3a57] bg-[#0a0e17]'
-                        )}>
+                        )}
+                        onDragOver={isEditingTimetable && !slot ? e => e.preventDefault() : undefined}
+                        onDrop={isEditingTimetable && !slot ? async e => {
+                          e.preventDefault();
+                          if (!draggingSlot) return;
+                          if (draggingSlot.day_order === day && draggingSlot.period === period) return;
+                          if (isPtSubjectSlot(draggingSlot) && ![4, 5, 6].includes(period)) {
+                            window.alert('PT can only be moved to Periods 4, 5, or 6.');
+                            return;
+                          }
+                          if (draggingSlot.staff_id) {
+                            const staffSlots = await getStaffTimetable(draggingSlot.staff_id);
+                            const clash = staffSlots.find(item =>
+                              item.class_id !== Number(id) && item.day_order === day && item.period === period
+                            );
+                            if (clash) {
+                              window.alert(`Staff already has another class at Day ${day} Period ${period}.`);
+                              return;
+                            }
+                          }
+                          setDraftTimetable(current => current.map(item =>
+                            item.day_order === draggingSlot.day_order && item.period === draggingSlot.period
+                              ? { ...item, day_order: day, period }
+                              : item
+                          ));
+                          setDraggingSlot(null);
+                        } : undefined}>
                           {slot ? (
-                            <div className="space-y-1">
+                            <div
+                              draggable={isEditingTimetable && slot.type !== 'placement'}
+                              onDragStart={() => {
+                                if (slot.type === 'placement') return;
+                                setDraggingSlot(slot);
+                              }}
+                              onDragEnd={() => setDraggingSlot(null)}
+                              className={clsx(
+                                'space-y-1',
+                                isEditingTimetable && slot.type !== 'placement' && 'cursor-grab active:cursor-grabbing'
+                              )}
+                            >
                               <div className="text-xs font-semibold text-white">{slot.subject_code || slot.type || 'Slot'}</div>
                               <div className="text-[11px] text-slate-400">{slot.staff_name || 'No staff'}</div>
                               {slot.lab_name && <div className="text-[11px] text-cyan-400">{slot.lab_name}</div>}
+                              {isEditingTimetable && slot.type !== 'placement' && (
+                                <div className="flex justify-end pt-1">
+                                  <button
+                                    onClick={() => handleRemoveDraftSlot(day, period)}
+                                    className="rounded border border-red-500/20 px-2 py-0.5 text-[10px] text-red-300 hover:bg-red-500/10"
+                                  >
+                                    Remove
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          ) : isEditingTimetable ? (
+                            <div className="flex min-h-[56px] items-center justify-center text-[11px] font-mono uppercase tracking-wider text-cyan-300">
+                              Drop Here
                             </div>
                           ) : (
                             <select

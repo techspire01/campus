@@ -49,7 +49,7 @@ def build_candidates(class_id, assignments, days, periods_per_day, occupied_slot
             for period in range(1, periods_per_day + 1):
                 if (day, period) in class_occupied:
                     continue
-                if only_late_periods and period not in (5, 6):
+                if only_late_periods and period not in (4, 5, 6):
                     continue
                 if staff_id_int and (day, period) in staff_slots:
                     continue
@@ -70,7 +70,7 @@ def explain_failure(assignments, candidates):
         if available < needed:
             insufficient.append(f"{label}: needs {needed}, only {available} free slot(s)")
         elif is_pt_subject(assignment):
-            restricted.append(f"{label}: PT can use only periods 5-6")
+            restricted.append(f"{label}: PT can use only periods 4-6")
 
     if insufficient:
         return "Insufficient unassigned slots for this class. " + "; ".join(insufficient)
