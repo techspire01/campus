@@ -229,9 +229,9 @@ async function ensureSchema() {
 async function ensureDefaultSubjects() {
   await pool.query(
     `INSERT INTO cg_subjects (name, code, type, dept_id, is_addon)
-     VALUES ($1, $2, $3, $4, $5)
+     VALUES ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10)
      ON CONFLICT (code) DO NOTHING`,
-    ['Physical Education', 'PT', 'common', null, false]
+    ['Physical Education', 'PT', 'common', null, false, 'EDC', 'EDC', 'common', null, false]
   );
 }
 
@@ -1024,6 +1024,24 @@ interface ClassSchedulerResponse {
   error?: string;
 }
 
+interface EDCSchedulerRequest {
+  classes: number[];
+  hours: number;
+  days: number[];
+  periods_per_day: number;
+  occupied_slots: Record<string, Array<{ day_order: number; period: number }>>;
+  existing_edc_slots: Record<string, Array<{ day_order: number; period: number }>>;
+}
+
+interface EDCSchedulerResponse {
+  scheduled_slots?: Array<{
+    class_id: number;
+    day_order: number;
+    period: number;
+  }>;
+  error?: string;
+}
+
 function runTamilScheduler(payload: TamilSchedulerRequest): Promise<TamilSchedulerResponse> {
   return new Promise((resolve, reject) => {
     const configuredPython = process.env.PYTHON_PATH;
@@ -1223,6 +1241,57 @@ function runClassScheduler(payload: ClassSchedulerRequest): Promise<ClassSchedul
         resolve(parsed);
       } catch {
         reject(new Error(`Invalid Class scheduler JSON output: ${stdout.substring(0, 200)}`));
+      }
+    });
+
+    python.stdin.write(JSON.stringify(payload));
+    python.stdin.end();
+  });
+}
+
+function runEDCScheduler(payload: EDCSchedulerRequest): Promise<EDCSchedulerResponse> {
+  return new Promise((resolve, reject) => {
+    const configuredPython = process.env.PYTHON_PATH;
+    const workspaceVenvWindows = path.join(process.cwd(), '.venv', 'Scripts', 'python.exe');
+    const workspaceVenvUnix = path.join(process.cwd(), '.venv', 'bin', 'python');
+    const pythonBinary = configuredPython
+      || (fs.existsSync(workspaceVenvWindows) ? workspaceVenvWindows : '')
+      || (fs.existsSync(workspaceVenvUnix) ? workspaceVenvUnix : '')
+      || 'python';
+    const scriptPath = path.join(process.cwd(), 'scheduler', 'edc_scheduler.py');
+    const python = spawn(pythonBinary, [scriptPath]);
+
+    let stdout = '';
+    let stderr = '';
+
+    python.stdout.on('data', (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+
+    python.stderr.on('data', (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+
+    python.on('error', (err: any) => {
+      reject(new Error(`EDC scheduler process error: ${err.message}`));
+    });
+
+    python.on('close', code => {
+      if (code !== 0) {
+        reject(new Error(`EDC scheduler failed with code ${code}: ${stderr || stdout || 'No output'}`));
+        return;
+      }
+
+      if (!stdout || stdout.trim() === '') {
+        reject(new Error('EDC scheduler produced no output'));
+        return;
+      }
+
+      try {
+        const parsed = JSON.parse(stdout.trim()) as EDCSchedulerResponse;
+        resolve(parsed);
+      } catch {
+        reject(new Error(`Invalid EDC scheduler JSON output: ${stdout.substring(0, 200)}`));
       }
     });
 
@@ -3222,6 +3291,200 @@ async function startServer() {
     } catch (e: any) {
       console.error('Class timetable generation error:', e);
       res.status(500).json({ error: e.message || 'Class timetable generation failed' });
+    }
+  });
+
+  app.post('/api/edc/generate', async (req, res) => {
+    try {
+      const selectedClassIds = Array.isArray(req.body?.class_ids)
+        ? [...new Set((req.body.class_ids as any[]).map(value => Number(value)).filter(value => Number.isFinite(value) && value > 0))]
+        : [];
+      const hours = Number(req.body?.hours);
+
+      if (selectedClassIds.length === 0) {
+        return res.status(400).json({ error: 'Select at least one class for EDC scheduling.' });
+      }
+      if (!Number.isFinite(hours) || hours <= 0) {
+        return res.status(400).json({ error: 'EDC hours must be greater than 0.' });
+      }
+
+      const [subjectResult, classResult, settingsResult] = await Promise.all([
+        pool.query(
+          `INSERT INTO cg_subjects (name, code, type, dept_id, is_addon)
+           VALUES ('EDC', 'EDC', 'common', NULL, FALSE)
+           ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
+           RETURNING id, code, name`
+        ),
+        pool.query(
+          `SELECT id FROM cg_classes WHERE id = ANY($1::int[])`,
+          [selectedClassIds]
+        ),
+        pool.query('SELECT key, value FROM cg_settings'),
+      ]);
+
+      if ((classResult.rowCount ?? 0) !== selectedClassIds.length) {
+        return res.status(400).json({ error: 'One or more selected classes were not found.' });
+      }
+
+      const edcSubjectId = Number(subjectResult.rows[0].id);
+      const settingsMap = settingsResult.rows.reduce((acc: Record<string, string>, row: any) => {
+        acc[String(row.key)] = String(row.value);
+        return acc;
+      }, {});
+      const periodsPerDay = Math.max(1, Number(settingsMap.periods_per_day || 6));
+
+      const [occupiedRows, existingEdcRows] = await Promise.all([
+        pool.query(
+          `SELECT class_id, day_order, period
+           FROM cg_timetable_slots
+           WHERE class_id = ANY($1::int[])
+             AND (subject_id IS DISTINCT FROM $2)`,
+          [selectedClassIds, edcSubjectId]
+        ),
+        pool.query(
+          `SELECT class_id, day_order, period
+           FROM cg_timetable_slots
+           WHERE class_id = ANY($1::int[])
+             AND subject_id = $2`,
+          [selectedClassIds, edcSubjectId]
+        ),
+      ]);
+
+      const occupiedSlots: Record<string, Array<{ day_order: number; period: number }>> = {};
+      const existingEdcSlots: Record<string, Array<{ day_order: number; period: number }>> = {};
+      for (const classId of selectedClassIds) {
+        occupiedSlots[String(classId)] = [];
+        existingEdcSlots[String(classId)] = [];
+      }
+      for (const row of occupiedRows.rows as Array<{ class_id: number; day_order: number; period: number }>) {
+        occupiedSlots[String(row.class_id)].push({
+          day_order: Number(row.day_order),
+          period: Number(row.period),
+        });
+      }
+      for (const row of existingEdcRows.rows as Array<{ class_id: number; day_order: number; period: number }>) {
+        existingEdcSlots[String(row.class_id)].push({
+          day_order: Number(row.day_order),
+          period: Number(row.period),
+        });
+      }
+
+      const schedule = await runEDCScheduler({
+        classes: selectedClassIds,
+        hours,
+        days: [1, 2, 3, 4, 5, 6],
+        periods_per_day: periodsPerDay,
+        occupied_slots: occupiedSlots,
+        existing_edc_slots: existingEdcSlots,
+      });
+
+      if (schedule.error) {
+        return res.status(400).json({ error: schedule.error });
+      }
+      if (!schedule.scheduled_slots || !Array.isArray(schedule.scheduled_slots) || schedule.scheduled_slots.length === 0) {
+        return res.status(400).json({ error: 'No feasible EDC timetable could be generated.' });
+      }
+
+      await inTransaction(async client => {
+        for (const classId of selectedClassIds) {
+          await client.query(
+            `INSERT INTO cg_class_subjects (class_id, subject_id, staff_id, hours_per_week, is_lab_required)
+             VALUES ($1, $2, NULL, $3, FALSE)
+             ON CONFLICT (class_id, subject_id) DO UPDATE
+             SET hours_per_week = EXCLUDED.hours_per_week,
+                 staff_id = NULL,
+                 is_lab_required = FALSE`,
+            [classId, edcSubjectId, hours]
+          );
+        }
+
+        await client.query(
+          `DELETE FROM cg_timetable_slots
+           WHERE class_id = ANY($1::int[]) AND subject_id = $2`,
+          [selectedClassIds, edcSubjectId]
+        );
+
+        for (const slot of schedule.scheduled_slots) {
+          await client.query(
+            `INSERT INTO cg_timetable_slots (class_id, day_order, period, subject_id, staff_id, lab_id, type, is_locked)
+             VALUES ($1, $2, $3, $4, NULL, NULL, 'common', FALSE)
+             ON CONFLICT (class_id, day_order, period) DO NOTHING`,
+            [Number(slot.class_id), Number(slot.day_order), Number(slot.period), edcSubjectId]
+          );
+        }
+      });
+
+      res.json({ success: true, slotCount: schedule.scheduled_slots.length, message: 'EDC timetable generated successfully.' });
+    } catch (e: any) {
+      console.error('EDC generation error:', e);
+      res.status(500).json({ error: e.message || 'EDC generation failed' });
+    }
+  });
+
+  app.post('/api/edc/unallocate', async (req, res) => {
+    try {
+      const requestedClassIds = Array.isArray(req.body?.class_ids)
+        ? [...new Set((req.body.class_ids as any[]).map(value => Number(value)).filter(value => Number.isFinite(value) && value > 0))]
+        : [];
+
+      const subjectResult = await pool.query(
+        `SELECT id FROM cg_subjects WHERE UPPER(code) = 'EDC' LIMIT 1`
+      );
+
+      if ((subjectResult.rowCount ?? 0) === 0) {
+        return res.json({ success: true, classCount: 0, message: 'EDC is not assigned to any classes.' });
+      }
+
+      const edcSubjectId = Number(subjectResult.rows[0].id);
+      let targetClassIds = requestedClassIds;
+
+      if (targetClassIds.length === 0) {
+        const assignedRows = await pool.query(
+          `SELECT DISTINCT class_id
+           FROM cg_class_subjects
+           WHERE subject_id = $1
+           ORDER BY class_id`,
+          [edcSubjectId]
+        );
+        targetClassIds = assignedRows.rows.map((row: any) => Number(row.class_id)).filter((value: number) => Number.isFinite(value) && value > 0);
+      } else {
+        const classResult = await pool.query(
+          `SELECT id FROM cg_classes WHERE id = ANY($1::int[])`,
+          [targetClassIds]
+        );
+        if ((classResult.rowCount ?? 0) !== targetClassIds.length) {
+          return res.status(400).json({ error: 'One or more selected classes were not found.' });
+        }
+      }
+
+      if (targetClassIds.length === 0) {
+        return res.json({ success: true, classCount: 0, message: 'EDC is not assigned to any classes.' });
+      }
+
+      await inTransaction(async client => {
+        await client.query(
+          `DELETE FROM cg_timetable_slots
+           WHERE class_id = ANY($1::int[])
+             AND subject_id = $2`,
+          [targetClassIds, edcSubjectId]
+        );
+
+        await client.query(
+          `DELETE FROM cg_class_subjects
+           WHERE class_id = ANY($1::int[])
+             AND subject_id = $2`,
+          [targetClassIds, edcSubjectId]
+        );
+      });
+
+      res.json({
+        success: true,
+        classCount: targetClassIds.length,
+        message: `EDC unallocated from ${targetClassIds.length} class${targetClassIds.length === 1 ? '' : 'es'}.`,
+      });
+    } catch (e: any) {
+      console.error('EDC unallocate error:', e);
+      res.status(500).json({ error: e.message || 'EDC unallocation failed' });
     }
   });
 

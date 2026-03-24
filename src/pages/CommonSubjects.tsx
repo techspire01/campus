@@ -6,7 +6,7 @@ import { emitDataInvalidation } from '../utils/dataInvalidation';
 type SubjectForm = {
   name: string;
   code: string;
-  type: 'core' | 'common' | 'lab';
+  type: 'core' | 'common' | 'lab' | 'pt' | 'edc';
   is_addon: boolean;
 };
 
@@ -142,14 +142,27 @@ export default function CommonSubjects() {
 
   const handleCreateSubjectOnly = async () => {
     setStatus(null);
+    const normalizedType = newSubject.type === 'pt' || newSubject.type === 'edc' ? 'common' : newSubject.type;
+    const normalizedName =
+      newSubject.type === 'pt' && !newSubject.name.trim()
+        ? 'Physical Education'
+        : newSubject.type === 'edc' && !newSubject.name.trim()
+        ? 'EDC'
+        : newSubject.name;
+    const normalizedCode =
+      newSubject.type === 'pt' && !newSubject.code.trim()
+        ? 'PT'
+        : newSubject.type === 'edc' && !newSubject.code.trim()
+        ? 'EDC'
+        : newSubject.code;
 
     const createRes = await fetch('/api/subjects', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        name: newSubject.name,
-        code: newSubject.code,
-        type: newSubject.type,
+        name: normalizedName,
+        code: normalizedCode,
+        type: normalizedType,
         dept_id: null,
         is_addon: newSubject.is_addon
       })
@@ -354,12 +367,22 @@ export default function CommonSubjects() {
                 <label className="text-xs text-slate-400">Type</label>
                 <select
                   value={newSubject.type}
-                  onChange={e => setNewSubject({ ...newSubject, type: e.target.value as SubjectForm['type'] })}
+                  onChange={e => {
+                    const nextType = e.target.value as SubjectForm['type'];
+                    setNewSubject(current => ({
+                      ...current,
+                      type: nextType,
+                      name: nextType === 'pt' && !current.name ? 'Physical Education' : nextType === 'edc' && !current.name ? 'EDC' : current.name,
+                      code: nextType === 'pt' && !current.code ? 'PT' : nextType === 'edc' && !current.code ? 'EDC' : current.code,
+                    }));
+                  }}
                   className="w-full mt-1 px-3 py-2 rounded-md border border-[#2a3a57] bg-[#0a0e17] text-sm"
                 >
                   <option value="common">Common</option>
                   <option value="core">Core</option>
                   <option value="lab">Lab</option>
+                  <option value="pt">PT</option>
+                  <option value="edc">EDC</option>
                 </select>
               </div>
               <div className="flex items-end">

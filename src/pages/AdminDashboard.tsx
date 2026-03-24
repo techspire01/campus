@@ -3,6 +3,8 @@ import { Settings, Department, Staff, Subject } from '../types';
 import { Plus, Trash2, Save, Settings as SettingsIcon, BookOpen, Building2, Calendar, Loader2 } from 'lucide-react';
 
 export default function AdminDashboard() {
+  type SubjectTypeOption = 'core' | 'common' | 'lab' | 'pt' | 'edc';
+
   const [settings, setSettings] = useState<Settings | null>(null);
   const [depts, setDepts] = useState<Department[]>([]);
   const [staff, setStaff] = useState<Staff[]>([]);
@@ -11,7 +13,7 @@ export default function AdminDashboard() {
   const [status, setStatus] = useState<{ type: 'success' | 'error', msg: string } | null>(null);
 
   const [newDept, setNewDept] = useState({ name: '', type: 'core' });
-  const [newSubject, setNewSubject] = useState({ name: '', code: '', type: 'core', dept_id: '', is_addon: false });
+  const [newSubject, setNewSubject] = useState({ name: '', code: '', type: 'core' as SubjectTypeOption, dept_id: '', is_addon: false });
 
   useEffect(() => {
     fetch('/api/settings').then(res => res.json()).then(setSettings);
@@ -58,11 +60,28 @@ export default function AdminDashboard() {
   };
 
   const handleAddSubject = async () => {
+    const normalizedType = newSubject.type === 'pt' || newSubject.type === 'edc' ? 'common' : newSubject.type;
+    const normalizedName =
+      newSubject.type === 'pt' && !newSubject.name.trim()
+        ? 'Physical Education'
+        : newSubject.type === 'edc' && !newSubject.name.trim()
+        ? 'EDC'
+        : newSubject.name;
+    const normalizedCode =
+      newSubject.type === 'pt' && !newSubject.code.trim()
+        ? 'PT'
+        : newSubject.type === 'edc' && !newSubject.code.trim()
+        ? 'EDC'
+        : newSubject.code;
+
     const res = await fetch('/api/subjects', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ...newSubject,
+        name: normalizedName,
+        code: normalizedCode,
+        type: normalizedType,
         dept_id: newSubject.dept_id ? parseInt(newSubject.dept_id) : null
       })
     });
@@ -240,11 +259,21 @@ export default function AdminDashboard() {
               <select 
                 className="bg-[#0a0e17] border border-[#1e2d47] rounded p-2 text-sm outline-none"
                 value={newSubject.type}
-                onChange={e => setNewSubject({...newSubject, type: e.target.value as any})}
+                onChange={e => {
+                  const nextType = e.target.value as SubjectTypeOption;
+                  setNewSubject(current => ({
+                    ...current,
+                    type: nextType,
+                    name: nextType === 'pt' && !current.name ? 'Physical Education' : nextType === 'edc' && !current.name ? 'EDC' : current.name,
+                    code: nextType === 'pt' && !current.code ? 'PT' : nextType === 'edc' && !current.code ? 'EDC' : current.code,
+                  }));
+                }}
               >
                 <option value="core">Core</option>
                 <option value="common">Common</option>
                 <option value="lab">Lab</option>
+                <option value="pt">PT</option>
+                <option value="edc">EDC</option>
               </select>
               <div className="flex gap-2">
                 <select 

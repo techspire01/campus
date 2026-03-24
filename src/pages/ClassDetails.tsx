@@ -89,6 +89,38 @@ export default function ClassDetails() {
     setDraftTimetable(timetable.filter(slot => slot.type !== 'placement'));
   }, [isEditingTimetable, timetable]);
 
+  useEffect(() => {
+    if (!isEditingTimetable) return;
+
+    const allowedSubjectIds = new Set(classSubjects.map(subject => Number(subject.subject_id)));
+    const subjectMeta = new Map<number, { staff_id: number | null; staff_name?: string; type: string }>(
+      classSubjects.map(subject => [
+        Number(subject.subject_id),
+        {
+          staff_id: subject.staff_id ?? null,
+          staff_name: subject.staff_name || undefined,
+          type: subject.is_lab_required ? 'lab' : 'core',
+        },
+      ])
+    );
+
+    setDraftTimetable(current =>
+      current
+        .filter(slot => !slot.subject_id || allowedSubjectIds.has(Number(slot.subject_id)))
+        .map(slot => {
+          if (!slot.subject_id) return slot;
+          const meta = subjectMeta.get(Number(slot.subject_id));
+          if (!meta) return slot;
+          return {
+            ...slot,
+            staff_id: meta.staff_id,
+            staff_name: meta.staff_name,
+            type: meta.type,
+          };
+        })
+    );
+  }, [classSubjects, isEditingTimetable]);
+
   const subjectSuggestionValues = useMemo(
     () => allSubjects.map(subject => `${subject.code} - ${subject.name}`),
     [allSubjects]
@@ -315,6 +347,11 @@ export default function ClassDetails() {
     });
 
     if (res.ok) {
+      if (isEditingTimetable) {
+        setDraftTimetable(current =>
+          current.filter(slot => slot.subject_id !== cs.subject_id)
+        );
+      }
       refreshData();
       emitDataInvalidation(['staff_workload', 'classes'], 'ClassDetails.handleUnassignStaff');
       setStatus({ type: 'success', msg: 'Staff unassigned successfully.' });
@@ -337,6 +374,12 @@ export default function ClassDetails() {
 
     if (res.ok) {
       setEditingSubjectId(null);
+      const removedSubject = classSubjects.find(item => item.id === classSubjectId);
+      if (isEditingTimetable && removedSubject) {
+        setDraftTimetable(current =>
+          current.filter(slot => slot.subject_id !== removedSubject.subject_id)
+        );
+      }
       refreshData();
       emitDataInvalidation(['staff_workload', 'classes', 'timetable'], 'ClassDetails.handleUnassignSubject');
       setStatus({ type: 'success', msg: 'Subject unassigned successfully.' });
@@ -515,6 +558,26 @@ export default function ClassDetails() {
       }));
   }, [classSubjects, labReqs]);
 
+  const timetableOnlySubjects = useMemo(() => {
+    const bySubjectId = new Map<number, { subject_id: number; subject_code: string; subject_name: string; staff_id: number | null; type: string | null }>();
+
+    for (const slot of timetable) {
+      if (!slot.subject_id) continue;
+      if (classSubjects.some(subject => subject.subject_id === slot.subject_id)) continue;
+      if (!bySubjectId.has(slot.subject_id)) {
+        bySubjectId.set(slot.subject_id, {
+          subject_id: slot.subject_id,
+          subject_code: slot.subject_code || `SUB-${slot.subject_id}`,
+          subject_name: slot.subject_name || slot.subject_code || `Subject ${slot.subject_id}`,
+          staff_id: slot.staff_id ?? null,
+          type: slot.type || 'core',
+        });
+      }
+    }
+
+    return Array.from(bySubjectId.values());
+  }, [timetable, classSubjects]);
+
   if (!cls || !settings) {
     return <div className="text-slate-300">Loading class details...</div>;
   }
@@ -530,6 +593,30 @@ export default function ClassDetails() {
     : null;
   const placementSlots = timetable.filter(slot => slot.type === 'placement');
   const activeTimetable = isEditingTimetable ? [...placementSlots, ...draftTimetable] : timetable;
+  const isProtectedDepartmentSlot = (slot: Pick<TimetableSlot, 'type' | 'subject_code' | 'subject_name'>) => {
+    if (slot.type === 'placement') return true;
+    const code = String(slot.subject_code || '').trim().toLowerCase();
+    const name = String(slot.subject_name || '').trim().toLowerCase();
+    return code === 'tam' || code === 'eng' || code === 'math' || code === 'mat' || name === 'tamil' || name === 'english' || name === 'mathematics';
+  };
+  const slotSubjectOptions = [
+    ...classSubjects.map(cs => ({
+      value: String(cs.subject_id),
+      label: `${cs.subject_code} - ${cs.subject_name}`,
+      subject_id: cs.subject_id,
+      staff_id: cs.staff_id ?? null,
+      type: cs.is_lab_required ? 'lab' : 'core',
+    })),
+    ...timetableOnlySubjects
+      .filter(subject => !classSubjects.some(cs => cs.subject_id === subject.subject_id))
+      .map(subject => ({
+        value: String(subject.subject_id),
+        label: `${subject.subject_code} - ${subject.subject_name}`,
+        subject_id: subject.subject_id,
+        staff_id: subject.staff_id,
+        type: subject.type || 'core',
+      })),
+  ];
 
   return (
     <div className="relative max-w-6xl mx-auto space-y-6">
@@ -978,21 +1065,21 @@ export default function ClassDetails() {
                         } : undefined}>
                           {slot ? (
                             <div
-                              draggable={isEditingTimetable && slot.type !== 'placement'}
+                              draggable={isEditingTimetable && !isProtectedDepartmentSlot(slot)}
                               onDragStart={() => {
-                                if (slot.type === 'placement') return;
+                                if (isProtectedDepartmentSlot(slot)) return;
                                 setDraggingSlot(slot);
                               }}
                               onDragEnd={() => setDraggingSlot(null)}
                               className={clsx(
                                 'space-y-1',
-                                isEditingTimetable && slot.type !== 'placement' && 'cursor-grab active:cursor-grabbing'
+                                isEditingTimetable && !isProtectedDepartmentSlot(slot) && 'cursor-grab active:cursor-grabbing'
                               )}
                             >
                               <div className="text-xs font-semibold text-white">{slot.subject_code || slot.type || 'Slot'}</div>
                               <div className="text-[11px] text-slate-400">{slot.staff_name || 'No staff'}</div>
                               {slot.lab_name && <div className="text-[11px] text-cyan-400">{slot.lab_name}</div>}
-                              {isEditingTimetable && slot.type !== 'placement' && (
+                              {isEditingTimetable && !isProtectedDepartmentSlot(slot) && (
                                 <div className="flex justify-end pt-1">
                                   <button
                                     onClick={() => handleRemoveDraftSlot(day, period)}
@@ -1012,17 +1099,17 @@ export default function ClassDetails() {
                               className="w-full text-xs bg-transparent text-slate-300 outline-none"
                               onChange={e => {
                                 if (!e.target.value) return;
-                                const cs = classSubjects.find(x => x.id === parseInt(e.target.value, 10));
-                                if (cs) {
-                                  handleAssignSlot(day, period, cs.subject_id, cs.staff_id, cs.is_lab_required ? 'lab' : 'core');
+                                const selected = slotSubjectOptions.find(option => option.value === e.target.value);
+                                if (selected) {
+                                  handleAssignSlot(day, period, selected.subject_id, selected.staff_id, selected.type);
                                 }
                               }}
                               value=""
                             >
                               <option value="">Assign</option>
-                              {classSubjects.map(cs => (
-                                <option key={cs.id} value={cs.id}>
-                                  {cs.subject_code}
+                              {slotSubjectOptions.map(option => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
                                 </option>
                               ))}
                             </select>
