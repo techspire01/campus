@@ -235,6 +235,21 @@ async function ensureDefaultSubjects() {
   );
 }
 
+function isProtectedDepartmentSubject(subject: {
+  type?: string | null;
+  code?: string | null;
+  name?: string | null;
+}) {
+  const type = String(subject.type || '').trim().toLowerCase();
+  if (type === 'placement' || type === 'tamil' || type === 'english' || type === 'mathematics') {
+    return true;
+  }
+
+  const code = String(subject.code || '').trim().toLowerCase();
+  const name = String(subject.name || '').trim().toLowerCase();
+  return code === 'tam' || code === 'eng' || code === 'math' || code === 'mat' || name === 'tamil' || name === 'english' || name === 'mathematics';
+}
+
 async function inTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
@@ -3236,6 +3251,10 @@ async function startServer() {
       }>).map(row => {
         const alreadyScheduled = existingSubjectCounts.get(Number(row.subject_id)) || 0;
         const remainingHours = Math.max(0, Number(row.hours_per_week) - alreadyScheduled);
+        const isProtected = isProtectedDepartmentSubject({
+          code: row.subject_code,
+          name: row.subject_name,
+        });
         return {
           class_subject_id: Number(row.id),
           subject_id: Number(row.subject_id),
@@ -3244,7 +3263,7 @@ async function startServer() {
           subject_type: row.is_lab_required ? 'lab' : String(row.subject_type || 'core'),
           staff_name: row.staff_name ? String(row.staff_name) : null,
           staff_id: row.staff_id ? Number(row.staff_id) : null,
-          hours_per_week: remainingHours,
+          hours_per_week: isProtected ? 0 : remainingHours,
           is_lab_required: !!row.is_lab_required,
         };
       }).filter(item => item.hours_per_week > 0);
@@ -4179,20 +4198,43 @@ async function startServer() {
         }
 
         const protectedRows = await client.query(
-          `SELECT day_order, period
-           FROM cg_timetable_slots
-           WHERE class_id = $1 AND type = 'placement'`,
+          `SELECT ts.id, ts.subject_id, ts.staff_id, ts.lab_id, ts.day_order, ts.period, ts.type, ts.is_locked,
+                  s.code AS subject_code, s.name AS subject_name
+           FROM cg_timetable_slots ts
+           LEFT JOIN cg_subjects s ON s.id = ts.subject_id
+           WHERE ts.class_id = $1`,
           [classId]
         );
-        const protectedKeys = new Set(
-          (protectedRows.rows as Array<{ day_order: number; period: number }>).map(row => `${row.day_order}-${row.period}`)
+        const protectedSlotRows = (protectedRows.rows as Array<{
+          id: number;
+          subject_id: number | null;
+          staff_id: number | null;
+          lab_id: number | null;
+          day_order: number;
+          period: number;
+          type: string | null;
+          is_locked: boolean;
+          subject_code: string | null;
+          subject_name: string | null;
+        }>).filter(row => isProtectedDepartmentSubject({
+          type: row.type,
+          code: row.subject_code,
+          name: row.subject_name,
+        }));
+        const protectedSlotByKey = new Map(
+          protectedSlotRows.map(row => [`${row.day_order}-${row.period}`, row])
         );
-        for (const slot of normalizedSlots) {
+        const managedSlots = normalizedSlots.filter(slot => {
           const key = `${slot.day_order}-${slot.period}`;
-          if (protectedKeys.has(key)) {
-            throw new Error(`Day ${slot.day_order} Period ${slot.period} is reserved for placement.`);
+          const protectedSlot = protectedSlotByKey.get(key);
+          if (!protectedSlot) {
+            return true;
           }
-        }
+          if (protectedSlot.subject_id !== slot.subject_id) {
+            throw new Error(`Day ${slot.day_order} Period ${slot.period} is reserved for an existing protected subject slot.`);
+          }
+          return false;
+        });
 
         if (staffIds.length > 0) {
           const staffBusyRows = await client.query(
@@ -4206,7 +4248,7 @@ async function startServer() {
               .map(row => `${row.staff_id}-${row.day_order}-${row.period}`)
           );
           const pendingKeys = new Set<string>();
-          for (const slot of normalizedSlots) {
+          for (const slot of managedSlots) {
             if (!slot.staff_id) continue;
             const key = `${slot.staff_id}-${slot.day_order}-${slot.period}`;
             if (busyKeys.has(key)) {
@@ -4230,7 +4272,7 @@ async function startServer() {
             (labBusyRows.rows as Array<{ lab_id: number; day_order: number; period: number }>)
               .map(row => `${row.lab_id}-${row.day_order}-${row.period}`)
           );
-          for (const slot of normalizedSlots) {
+          for (const slot of managedSlots) {
             if (!slot.lab_id) continue;
             const key = `${slot.lab_id}-${slot.day_order}-${slot.period}`;
             if (busyKeys.has(key)) {
@@ -4239,13 +4281,21 @@ async function startServer() {
           }
         }
 
-        await client.query(
-          `DELETE FROM cg_timetable_slots
-           WHERE class_id = $1 AND (type IS NULL OR type <> 'placement')`,
-          [classId]
-        );
+        if (protectedSlotRows.length > 0) {
+          await client.query(
+            `DELETE FROM cg_timetable_slots
+             WHERE class_id = $1 AND id <> ALL($2::int[])`,
+            [classId, protectedSlotRows.map(row => Number(row.id))]
+          );
+        } else {
+          await client.query(
+            `DELETE FROM cg_timetable_slots
+             WHERE class_id = $1`,
+            [classId]
+          );
+        }
 
-        for (const slot of normalizedSlots) {
+        for (const slot of managedSlots) {
           await client.query(
             `INSERT INTO cg_timetable_slots (class_id, day_order, period, subject_id, staff_id, lab_id, type, is_locked)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,

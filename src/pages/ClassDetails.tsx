@@ -661,6 +661,11 @@ export default function ClassDetails() {
     const name = String(slot.subject_name || '').trim().toLowerCase();
     return code === 'tam' || code === 'eng' || code === 'math' || code === 'mat' || name === 'tamil' || name === 'english' || name === 'mathematics';
   };
+  const tabulationSubjects = classSubjects.filter(cs => !isProtectedDepartmentSlot({
+    type: cs.is_lab_required ? 'lab' : 'core',
+    subject_code: cs.subject_code,
+    subject_name: cs.subject_name,
+  }));
   const slotSubjectOptions = [
     ...classSubjects.map(cs => ({
       value: String(cs.subject_id),
@@ -935,7 +940,7 @@ export default function ClassDetails() {
         <div className="mb-6 overflow-x-auto rounded-xl border border-[#243550] bg-[#141c2e]">
           <div className="flex items-center justify-between border-b border-[#243550] px-4 py-3">
             <h3 className="text-sm font-semibold text-white">Subject Tabulation</h3>
-            <span className="text-xs text-slate-400">{classSubjects.length} assigned subjects</span>
+            <span className="text-xs text-slate-400">{tabulationSubjects.length} assigned subjects</span>
           </div>
           <table className="w-full border-collapse">
             <thead>
@@ -950,7 +955,7 @@ export default function ClassDetails() {
               </tr>
             </thead>
             <tbody>
-              {classSubjects.map(cs => (
+              {tabulationSubjects.map(cs => (
                   <tr key={`tabulation-${cs.id}`} className="border-b border-[#243550] last:border-b-0">
                     <td className="p-3 text-sm font-semibold text-cyan-300">{cs.subject_code}</td>
                     <td className="p-3 text-sm text-white">{cs.subject_name}</td>
@@ -1062,7 +1067,7 @@ export default function ClassDetails() {
                     </td>
                   </tr>
               ))}
-              {classSubjects.length === 0 && (
+              {tabulationSubjects.length === 0 && (
                 <tr>
                   <td colSpan={7} className="p-4 text-center text-sm text-slate-400">
                     No subjects assigned yet.
